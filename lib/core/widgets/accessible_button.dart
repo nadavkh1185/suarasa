@@ -30,7 +30,7 @@ class AccessibleButton extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
-    final isHc = theme.colorScheme.surface == Colors.black; // Detect High Contrast
+    final isHc = theme.colorScheme.primary.value == const Color(0xFF062947).value;
 
     Color buttonColor;
     Color contentColor;
@@ -93,7 +93,7 @@ class AccessibleButton extends StatelessWidget {
           backgroundColor: buttonColor,
           side: borderSide,
           shape: RoundedRectangleBorder(
-            borderRadius: BorderRadius.circular(isHc ? 12 : 18),
+            borderRadius: BorderRadius.circular(8),
           ),
           elevation: isHc ? 0 : 2,
         ),

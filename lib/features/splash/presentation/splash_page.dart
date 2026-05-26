@@ -44,7 +44,7 @@ class _SplashPageState extends State<SplashPage> with SingleTickerProviderStateM
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
-    final isHc = theme.colorScheme.surface == Colors.black;
+    final isHc = theme.colorScheme.primary.value == const Color(0xFF062947).value;
 
     return Scaffold(
       body: Semantics(
@@ -56,17 +56,11 @@ class _SplashPageState extends State<SplashPage> with SingleTickerProviderStateM
           width: double.infinity,
           height: double.infinity,
           decoration: BoxDecoration(
-            gradient: isHc
-                ? null
-                : LinearGradient(
-                    colors: [
-                      theme.colorScheme.surface,
-                      theme.colorScheme.surface,
-                    ],
-                    begin: Alignment.topCenter,
-                    end: Alignment.bottomCenter,
-                  ),
-            color: isHc ? Colors.black : null,
+            gradient: const LinearGradient(
+              colors: [Color(0xFFEAF7FF), Color(0xFFCDEBFF)],
+              begin: Alignment.topCenter,
+              end: Alignment.bottomCenter,
+            ),
           ),
           child: Column(
             mainAxisAlignment: MainAxisAlignment.center,
@@ -76,13 +70,10 @@ class _SplashPageState extends State<SplashPage> with SingleTickerProviderStateM
                 opacity: _fadeAnimation,
                 child: Column(
                   children: [
-                    // Dynamic visual glow branding for normal dark mode, high contrast block style for high contrast
                     Container(
                       padding: const EdgeInsets.all(24),
                       decoration: BoxDecoration(
-                        color: isHc 
-                            ? Colors.black 
-                            : theme.colorScheme.primary.withOpacity(0.08),
+                        color: theme.colorScheme.primary.withValues(alpha: 0.08),
                         shape: BoxShape.circle,
                         border: isHc 
                             ? Border.all(color: theme.colorScheme.primary, width: 4)
@@ -99,7 +90,7 @@ class _SplashPageState extends State<SplashPage> with SingleTickerProviderStateM
                       'Suarasa',
                       style: theme.textTheme.displayLarge?.copyWith(
                         fontWeight: FontWeight.w900,
-                        letterSpacing: 2,
+                        letterSpacing: 0,
                       ),
                     ),
                     const SizedBox(height: 12),

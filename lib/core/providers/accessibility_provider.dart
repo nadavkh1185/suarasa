@@ -1,11 +1,8 @@
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 enum DisabilityMode {
-  normal,      // Standard responsive UI
-  tunanetra,   // Visually Impaired: Large text, voice alerts, shake to activate AI vision
-  tunarungu,   // Hearing Impaired: Audio level alerts, high-readability transcription
-  tunawicara,  // Speech Impaired: Quick AAC presets + Text-to-Speech tool
-  ganda        // Deaf-Blind / Double: Specialized haptic guides & Morse input
+  adaptive, // Satu mode otomatis: suara, visual, AI, dan haptic aktif bersama.
+  hapticFocus,
 }
 
 class AccessibilitySettings {
@@ -35,7 +32,7 @@ class AccessibilitySettings {
 class AccessibilityNotifier extends StateNotifier<AccessibilitySettings> {
   AccessibilityNotifier()
       : super(const AccessibilitySettings(
-          mode: DisabilityMode.normal,
+          mode: DisabilityMode.adaptive,
           isHighContrast: false,
           textScaleFactor: 1.0,
         ));
@@ -44,24 +41,14 @@ class AccessibilityNotifier extends StateNotifier<AccessibilitySettings> {
     double scale = 1.0;
     bool highContrast = state.isHighContrast;
     
-    // Auto-configure optimal settings based on mode
     switch (mode) {
-      case DisabilityMode.tunanetra:
-        scale = 1.3;
-        highContrast = true; // Auto-enable high contrast for visually impaired
-        break;
-      case DisabilityMode.tunarungu:
-        scale = 1.2;
-        break;
-      case DisabilityMode.tunawicara:
-        scale = 1.1;
-        break;
-      case DisabilityMode.ganda:
+      case DisabilityMode.hapticFocus:
         scale = 1.4;
         highContrast = true;
         break;
-      case DisabilityMode.normal:
+      case DisabilityMode.adaptive:
         scale = 1.0;
+        highContrast = false;
         break;
     }
 
@@ -74,6 +61,14 @@ class AccessibilityNotifier extends StateNotifier<AccessibilitySettings> {
 
   void toggleHighContrast() {
     state = state.copyWith(isHighContrast: !state.isHighContrast);
+  }
+
+  void enableHapticFocus() {
+    setDisabilityMode(DisabilityMode.hapticFocus);
+  }
+
+  void enableAdaptiveMode() {
+    setDisabilityMode(DisabilityMode.adaptive);
   }
 
   void setTextScaleFactor(double factor) {

@@ -1,12 +1,19 @@
 import 'dart:async';
+import 'dart:math';
+
+import 'package:camera/camera.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_tts/flutter_tts.dart';
 import 'package:go_router/go_router.dart';
 import 'package:sensors_plus/sensors_plus.dart';
+import 'package:speech_to_text/speech_to_text.dart' as stt;
+import 'package:vibration/vibration.dart';
+
 import '../../../core/providers/accessibility_provider.dart';
 import '../../../core/router/app_router.dart';
+import '../../../core/services/ai_demo_service.dart';
 import '../../../core/widgets/accessible_button.dart';
 import '../../../core/widgets/custom_card.dart';
 
@@ -18,35 +25,104 @@ class HomePage extends ConsumerStatefulWidget {
 }
 
 class _HomePageState extends ConsumerState<HomePage> {
-  final FlutterTts _flutterTts = FlutterTts();
-  StreamSubscription? _accelerometerSubscription;
+  final FlutterTts _tts = FlutterTts();
+  final stt.SpeechToText _speech = stt.SpeechToText();
+  final AiDemoService _aiDemo = const AiDemoService();
+  final TextEditingController _quickTextController = TextEditingController();
+
+  CameraController? _cameraController;
+  StreamSubscription<AccelerometerEvent>? _accelerometerSubscription;
+
+  bool _speechReady = false;
+  bool _isListening = false;
+  bool _isCameraReady = false;
+  bool _isRecordingVideo = false;
+  bool _hasVibrator = false;
+  double _motionLevel = 0;
+  int _hapticSignals = 0;
+  String _spokenCommand = 'Ucapkan nama menu atau kebutuhan.';
+  String _aiMessage =
+      'AI demo siap membantu memilih aksi dari suara, kamera, dan sensor gerak.';
+  String _mediaStatus = 'Kamera belum aktif';
   DateTime? _lastShakeTime;
-  
-  // Shake detection thresholds
-  static const double shakeThreshold = 18.0; 
-  static const Duration shakeCooldown = Duration(seconds: 2);
+
+  static const Duration _shakeCooldown = Duration(seconds: 2);
+  static const double _shakeThreshold = 21;
 
   @override
   void initState() {
     super.initState();
     _initTts();
-    _startShakeDetection();
+    _initSpeech();
+    _initHaptic();
+    _initCamera();
+    _startMotionDetection();
   }
 
   Future<void> _initTts() async {
-    await _flutterTts.setLanguage('id-ID'); // Indonesian language
-    await _flutterTts.setPitch(1.0);
-    await _flutterTts.setSpeechRate(0.5);
+    await _tts.setLanguage('id-ID');
+    await _tts.setPitch(1);
+    await _tts.setSpeechRate(0.48);
   }
 
-  void _startShakeDetection() {
-    // Listen to accelerometer stream to catch sudden movements
-    _accelerometerSubscription = accelerometerEventStream().listen((AccelerometerEvent event) {
-      final double acceleration = event.x.abs() + event.y.abs() + event.z.abs();
-      
-      if (acceleration > shakeThreshold) {
+  Future<void> _initSpeech() async {
+    final ready = await _speech.initialize();
+    if (mounted) {
+      setState(() => _speechReady = ready);
+    }
+  }
+
+  Future<void> _initHaptic() async {
+    final hasVibrator = await Vibration.hasVibrator() ?? false;
+    if (mounted) {
+      setState(() => _hasVibrator = hasVibrator);
+    }
+  }
+
+  Future<void> _initCamera() async {
+    try {
+      final cameras = await availableCameras();
+      if (cameras.isEmpty) {
+        if (mounted) setState(() => _mediaStatus = 'Kamera tidak ditemukan');
+        return;
+      }
+
+      final controller = CameraController(
+        cameras.first,
+        ResolutionPreset.medium,
+        enableAudio: true,
+      );
+      await controller.initialize();
+
+      if (!mounted) {
+        await controller.dispose();
+        return;
+      }
+
+      setState(() {
+        _cameraController = controller;
+        _isCameraReady = true;
+        _mediaStatus = 'Kamera siap untuk foto dan video demo';
+      });
+    } catch (_) {
+      if (mounted) {
+        setState(() => _mediaStatus = 'Kamera perlu izin perangkat');
+      }
+    }
+  }
+
+  void _startMotionDetection() {
+    _accelerometerSubscription =
+        accelerometerEventStream().listen((AccelerometerEvent event) {
+      final level = sqrt(event.x * event.x + event.y * event.y + event.z * event.z);
+      if (mounted) {
+        setState(() => _motionLevel = level);
+      }
+
+      if (level > _shakeThreshold) {
         final now = DateTime.now();
-        if (_lastShakeTime == null || now.difference(_lastShakeTime!) > shakeCooldown) {
+        if (_lastShakeTime == null ||
+            now.difference(_lastShakeTime!) > _shakeCooldown) {
           _lastShakeTime = now;
           _onShakeDetected();
         }
@@ -54,76 +130,195 @@ class _HomePageState extends ConsumerState<HomePage> {
     });
   }
 
-  void _onShakeDetected() {
-    // Trigger heavy vibration
-    HapticFeedback.heavyImpact();
-    
-    // Announce to user that system is listening
-    _speak('Goyangan terdeteksi. Sistem asisten suara Suarasa siap mendengarkan.');
-    
-    ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(
-        content: Text('Goyangan terdeteksi! Mikrofon siap menerima perintah.'),
-        duration: Duration(seconds: 2),
-        backgroundColor: Colors.indigo,
-      ),
+  Future<void> _onShakeDetected() async {
+    ref.read(accessibilityProvider.notifier).enableHapticFocus();
+    await _playHapticPattern([0, 120, 90, 240]);
+    await _speak(
+      'Goyangan terdeteksi. Mode haptic fokus aktif. Ucapkan menu yang ingin dibuka.',
+    );
+    if (!_isListening) {
+      await _listenForCommand();
+    }
+  }
+
+  Future<void> _listenForCommand() async {
+    if (!_speechReady) {
+      await _speak('Perekam suara belum siap. Periksa izin mikrofon.');
+      return;
+    }
+
+    setState(() => _isListening = true);
+    await _playHapticPattern([0, 80]);
+    await _speech.listen(
+      localeId: 'id_ID',
+      listenMode: stt.ListenMode.confirmation,
+      onResult: (result) async {
+        if (!result.finalResult) return;
+        final text = result.recognizedWords.trim();
+        if (text.isEmpty) return;
+        await _handleCommand(text);
+      },
     );
   }
 
+  Future<void> _stopListening() async {
+    await _speech.stop();
+    if (mounted) {
+      setState(() => _isListening = false);
+    }
+  }
+
+  Future<void> _handleCommand(String text) async {
+    await _stopListening();
+    final result = _aiDemo.understandCommand(text);
+    setState(() {
+      _spokenCommand = text;
+      _aiMessage = result.message;
+    });
+    await _playHapticPattern(result.hapticPattern);
+    await _speak(result.message);
+
+    final lower = text.toLowerCase();
+    if (lower.contains('kamera') ||
+        lower.contains('foto') ||
+        lower.contains('gambar') ||
+        lower.contains('lihat')) {
+      await _takePictureDemo();
+    } else if (lower.contains('video') || lower.contains('rekam')) {
+      await _toggleVideoRecording();
+    }
+  }
+
+  Future<void> _takePictureDemo() async {
+    final controller = _cameraController;
+    if (controller == null || !_isCameraReady || controller.value.isTakingPicture) {
+      final result = _aiDemo.describeScene(hasCameraFrame: false);
+      setState(() => _aiMessage = result.message);
+      await _speak(result.message);
+      return;
+    }
+
+    try {
+      final file = await controller.takePicture();
+      final result = _aiDemo.describeScene(hasCameraFrame: true);
+      setState(() {
+        _mediaStatus = 'Foto demo tersimpan: ${file.name}';
+        _aiMessage = result.message;
+      });
+      await _playHapticPattern(result.hapticPattern);
+      await _speak(result.message);
+    } catch (_) {
+      setState(() => _mediaStatus = 'Foto demo belum berhasil');
+    }
+  }
+
+  Future<void> _toggleVideoRecording() async {
+    final controller = _cameraController;
+    if (controller == null || !_isCameraReady) {
+      setState(() => _mediaStatus = 'Video perlu kamera aktif');
+      return;
+    }
+
+    try {
+      if (_isRecordingVideo) {
+        final file = await controller.stopVideoRecording();
+        setState(() {
+          _isRecordingVideo = false;
+          _mediaStatus = 'Video demo tersimpan: ${file.name}';
+        });
+        await _playHapticPattern([0, 70, 70, 70]);
+        await _speak('Rekaman video demo selesai.');
+      } else {
+        await controller.startVideoRecording();
+        setState(() {
+          _isRecordingVideo = true;
+          _mediaStatus = 'Sedang merekam video demo';
+        });
+        await _playHapticPattern([0, 180]);
+        await _speak('Rekaman video demo dimulai.');
+      }
+    } catch (_) {
+      setState(() => _mediaStatus = 'Rekam video belum berhasil');
+    }
+  }
+
+  Future<void> _playHapticPattern(List<int> pattern) async {
+    setState(() => _hapticSignals += 1);
+    if (_hasVibrator) {
+      await Vibration.vibrate(pattern: pattern);
+    } else {
+      HapticFeedback.mediumImpact();
+    }
+  }
+
   Future<void> _speak(String text) async {
-    await _flutterTts.stop();
-    await _flutterTts.speak(text);
+    await _tts.stop();
+    await _tts.speak(text);
   }
 
   @override
   void dispose() {
     _accelerometerSubscription?.cancel();
-    _flutterTts.stop();
+    _cameraController?.dispose();
+    _quickTextController.dispose();
+    _speech.stop();
+    _tts.stop();
     super.dispose();
   }
 
   @override
   Widget build(BuildContext context) {
-    final settings = ref.watch(accessibilityProvider);
     final theme = Theme.of(context);
+    final settings = ref.watch(accessibilityProvider);
 
     return Scaffold(
       appBar: AppBar(
-        title: const Text('Suarasa Dashboard'),
+        title: const Text('Suarasa'),
         actions: [
           IconButton(
-            icon: Icon(
-              settings.isHighContrast ? Icons.lens : Icons.lens_outlined,
-              semanticLabel: 'Ubah Kontras Tema',
-            ),
-            onPressed: () {
-              ref.read(accessibilityProvider.notifier).toggleHighContrast();
-            },
+            tooltip: 'Kalibrasi',
+            icon: const Icon(Icons.tune_rounded),
+            onPressed: () => context.go(AppRouter.modeSelector),
           ),
           IconButton(
-            icon: const Icon(Icons.settings_accessibility, semanticLabel: 'Pilih Mode Disabilitas'),
-            onPressed: () => context.go(AppRouter.modeSelector),
+            tooltip: 'Haptic fokus',
+            icon: Icon(
+              settings.mode == DisabilityMode.hapticFocus
+                  ? Icons.vibration_rounded
+                  : Icons.vibration_outlined,
+            ),
+            onPressed: () {
+              final notifier = ref.read(accessibilityProvider.notifier);
+              if (settings.mode == DisabilityMode.hapticFocus) {
+                notifier.enableAdaptiveMode();
+              } else {
+                notifier.enableHapticFocus();
+              }
+            },
           ),
         ],
       ),
       body: SafeArea(
-        child: Padding(
-          padding: const EdgeInsets.all(16.0),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.stretch,
+        child: Container(
+          decoration: const BoxDecoration(
+            gradient: LinearGradient(
+              colors: [Color(0xFFEAF7FF), Color(0xFFCDEBFF)],
+              begin: Alignment.topCenter,
+              end: Alignment.bottomCenter,
+            ),
+          ),
+          child: ListView(
+            padding: const EdgeInsets.all(16),
             children: [
-              // Welcome Widget
-              _buildHeaderCard(settings),
-              const SizedBox(height: 16),
-              
-              // Dynamic Mode Layout
-              Expanded(
-                child: _buildLayoutForMode(settings.mode, theme),
-              ),
-              
-              const SizedBox(height: 12),
-              // Footer Configuration Card
-              _buildQuickSettingsCard(settings),
+              _buildHero(theme),
+              const SizedBox(height: 14),
+              _buildSignalGrid(theme),
+              const SizedBox(height: 14),
+              _buildCameraDemo(theme),
+              const SizedBox(height: 14),
+              _buildAiPanel(theme),
+              const SizedBox(height: 14),
+              _buildQuickSpeak(theme),
             ],
           ),
         ),
@@ -131,435 +326,232 @@ class _HomePageState extends ConsumerState<HomePage> {
     );
   }
 
-  Widget _buildHeaderCard(AccessibilitySettings settings) {
-    String message = 'Halo, Selamat Datang';
-    switch (settings.mode) {
-      case DisabilityMode.tunanetra:
-        message = 'Halo. Mode Tunanetra Aktif. Goyang ponsel untuk bantuan.';
-        break;
-      case DisabilityMode.tunarungu:
-        message = 'Halo. Mode Tunarungu Aktif. Suara sekitar dideteksi.';
-        break;
-      case DisabilityMode.tunawicara:
-        message = 'Halo. Mode Tunawicara Aktif. Ketuk untuk berbicara.';
-        break;
-      case DisabilityMode.ganda:
-        message = 'Halo. Mode Disabilitas Ganda Aktif. Umpan balik haptic.';
-        break;
-      default:
-        break;
-    }
-
+  Widget _buildHero(ThemeData theme) {
     return CustomCard(
-      backgroundColor: settings.isHighContrast ? Colors.black : Colors.indigo.withValues(alpha: 0.1),
-      semanticLabel: message,
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
+      semanticLabel: 'Dashboard Suarasa terpadu',
+      child: Row(
         children: [
-          Text(
-            message,
-            style: Theme.of(context).textTheme.titleLarge?.copyWith(
-              fontWeight: FontWeight.w900,
+          Container(
+            width: 70,
+            height: 70,
+            decoration: BoxDecoration(
+              color: theme.colorScheme.primary.withValues(alpha: 0.1),
+              borderRadius: BorderRadius.circular(8),
+            ),
+            child: Icon(
+              Icons.settings_voice_rounded,
+              color: theme.colorScheme.primary,
+              size: 42,
             ),
           ),
-          if (settings.mode == DisabilityMode.tunanetra) ...[
-            const SizedBox(height: 8),
-            const Text(
-              'Instruksi: Goyangkan perangkat ke kiri/kanan untuk mengambil gambar dan mendeskripsikan kondisi sekitar secara otomatis.',
-              style: TextStyle(fontSize: 14),
+          const SizedBox(width: 14),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  'Bantuan adaptif aktif',
+                  style: theme.textTheme.titleLarge?.copyWith(
+                    fontWeight: FontWeight.w900,
+                  ),
+                ),
+                const SizedBox(height: 6),
+                Text(
+                  'Suara, kamera, AI, dan getaran bekerja dalam satu layar.',
+                  style: theme.textTheme.bodyMedium,
+                ),
+              ],
             ),
-          ],
+          ),
         ],
       ),
     );
   }
 
-  Widget _buildLayoutForMode(DisabilityMode mode, ThemeData theme) {
-    switch (mode) {
-      case DisabilityMode.tunanetra:
-        return _buildTunanetraLayout(theme);
-      case DisabilityMode.tunarungu:
-        return _buildTunarunguLayout(theme);
-      case DisabilityMode.tunawicara:
-        return _buildTunawicaraLayout(theme);
-      case DisabilityMode.ganda:
-        return _buildGandaLayout(theme);
-      default:
-        return _buildNormalLayout(theme);
-    }
-  }
-
-  // --- 1. Tunanetra Layout (Giant Audio and Visual triggers) ---
-  Widget _buildTunanetraLayout(ThemeData theme) {
-    return Column(
-      mainAxisAlignment: MainAxisAlignment.center,
+  Widget _buildSignalGrid(ThemeData theme) {
+    final motionText = _motionLevel.toStringAsFixed(1);
+    return GridView.count(
+      shrinkWrap: true,
+      physics: const NeverScrollableScrollPhysics(),
+      crossAxisCount: 2,
+      mainAxisSpacing: 12,
+      crossAxisSpacing: 12,
+      childAspectRatio: 1.08,
       children: [
-        Expanded(
-          child: CustomCard(
-            onTap: () {
-              _speak('Mengambil gambar di depan Anda. Mengirim ke Gemini AI untuk dianalisis.');
-            },
-            semanticLabel: 'Tombol Besar: Ambil Foto & Analisis Lingkungan',
-            semanticHint: 'Klik dua kali untuk mengambil gambar sekitar dan mendengarkan penjelasan AI.',
-            backgroundColor: theme.colorScheme.primary.withValues(alpha: 0.2),
-            child: Center(
-              child: Column(
-                mainAxisAlignment: MainAxisAlignment.center,
-                children: [
-                  Icon(
-                    Icons.camera_enhance_rounded,
-                    size: 80,
-                    color: theme.colorScheme.primary,
-                  ),
-                  const SizedBox(height: 16),
-                  Text(
-                    'DETEKSI SEKITAR',
-                    style: theme.textTheme.displaySmall?.copyWith(fontWeight: FontWeight.w900),
-                    textAlign: TextAlign.center,
-                  ),
-                  const SizedBox(height: 8),
-                  const Text('Ketuk untuk merekam & menceritakan lingkungan Anda', textAlign: TextAlign.center),
-                ],
-              ),
-            ),
-          ),
+        _ActionTile(
+          icon: _isListening ? Icons.hearing_rounded : Icons.mic_rounded,
+          label: _isListening ? 'Mendengar' : 'Perintah',
+          value: _speechReady ? 'Siap' : 'Izin mic',
+          onTap: _isListening ? _stopListening : _listenForCommand,
         ),
-        const SizedBox(height: 16),
-        AccessibleButton(
-          label: 'MULAI ASISTEN SUARA',
-          onPressed: () {
-            _speak('Asisten suara diaktifkan. Silakan ucapkan pertanyaan Anda setelah getaran.');
-            HapticFeedback.vibrate();
-          },
-          icon: Icons.mic_rounded,
+        _ActionTile(
+          icon: Icons.photo_camera_rounded,
+          label: 'Foto',
+          value: _isCameraReady ? 'Siap' : 'Izin kamera',
+          onTap: _takePictureDemo,
+        ),
+        _ActionTile(
+          icon: _isRecordingVideo ? Icons.stop_circle_rounded : Icons.videocam_rounded,
+          label: 'Video',
+          value: _isRecordingVideo ? 'Rekam' : 'Demo',
+          onTap: _toggleVideoRecording,
+        ),
+        _ActionTile(
+          icon: Icons.vibration_rounded,
+          label: 'Haptic',
+          value: 'Gerak $motionText',
+          onTap: () => _playHapticPattern([0, 100, 80, 220]),
         ),
       ],
     );
   }
 
-  // --- 2. Tunarungu Layout (Real-time sound level & transcription prompt) ---
-  Widget _buildTunarunguLayout(ThemeData theme) {
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.stretch,
-      children: [
-        Expanded(
-          flex: 2,
-          child: CustomCard(
-            semanticLabel: 'Indikator Kebisingan Lingkungan: Normal',
-            child: Column(
-              mainAxisAlignment: MainAxisAlignment.center,
-              children: [
-                const Icon(Icons.volume_up_rounded, size: 48, color: Colors.green),
-                const SizedBox(height: 12),
-                Text(
-                  'Kebisingan: Normal (45 dB)',
-                  style: theme.textTheme.titleLarge?.copyWith(fontWeight: FontWeight.bold),
-                ),
-                const SizedBox(height: 8),
-                const Text('Sistem mendengarkan sirine atau alarm darurat di sekitar Anda.'),
-              ],
-            ),
-          ),
-        ),
-        const SizedBox(height: 16),
-        Expanded(
-          flex: 3,
-          child: CustomCard(
-            semanticLabel: 'Mulai Transkripsi Kalimat Bicara',
-            child: Column(
-              mainAxisAlignment: MainAxisAlignment.center,
-              children: [
-                Icon(Icons.subtitles_rounded, size: 54, color: theme.colorScheme.secondary),
-                const SizedBox(height: 12),
-                Text(
-                  'Transkripsi Suara',
-                  style: theme.textTheme.titleMedium?.copyWith(fontWeight: FontWeight.bold),
-                ),
-                const SizedBox(height: 8),
-                const Text(
-                  'Klik tombol di bawah untuk menampilkan teks perkataan orang lain di sekitar secara langsung.',
-                  textAlign: TextAlign.center,
-                ),
-              ],
-            ),
-          ),
-        ),
-        const SizedBox(height: 16),
-        AccessibleButton(
-          label: 'MULAI TRANSKRIPSI',
-          onPressed: () {
-            ScaffoldMessenger.of(context).showSnackBar(
-              const SnackBar(content: Text('Memulai perekam mikrofon untuk teks real-time...')),
-            );
-          },
-          icon: Icons.play_arrow_rounded,
-        ),
-      ],
-    );
-  }
-
-  // --- 3. Tunawicara Layout (AAC Presets & TTS text input) ---
-  Widget _buildTunawicaraLayout(ThemeData theme) {
-    final TextEditingController textController = TextEditingController();
-
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.stretch,
-      children: [
-        // Text Input area
-        Row(
-          children: [
-            Expanded(
-              child: TextField(
-                controller: textController,
-                style: const TextStyle(fontSize: 18),
-                decoration: InputDecoration(
-                  hintText: 'Ketik apa yang ingin Anda bicarakan...',
-                  border: OutlineInputBorder(
-                    borderRadius: BorderRadius.circular(12),
-                  ),
-                  contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 16),
-                ),
-              ),
-            ),
-            const SizedBox(width: 8),
-            Semantics(
-              label: 'Suarakan teks input',
-              button: true,
-              child: InkWell(
-                onTap: () {
-                  if (textController.text.isNotEmpty) {
-                    _speak(textController.text);
-                  }
-                },
-                child: Container(
-                  height: 56,
-                  width: 56,
-                  decoration: BoxDecoration(
-                    color: theme.colorScheme.primary,
-                    borderRadius: BorderRadius.circular(12),
-                  ),
-                  child: const Icon(Icons.volume_up_rounded, color: Colors.white),
-                ),
-              ),
-            ),
-          ],
-        ),
-        const SizedBox(height: 16),
-        Text(
-          'Preset Komunikasi Cepat (AAC)',
-          style: theme.textTheme.titleMedium?.copyWith(fontWeight: FontWeight.bold),
-        ),
-        const SizedBox(height: 8),
-        Expanded(
-          child: GridView.count(
-            crossAxisCount: 2,
-            childAspectRatio: 1.4,
-            crossAxisSpacing: 12,
-            mainAxisSpacing: 12,
+  Widget _buildCameraDemo(ThemeData theme) {
+    final controller = _cameraController;
+    return CustomCard(
+      semanticLabel: 'Demo kamera. $_mediaStatus',
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
             children: [
-              _buildAacCard('Tolong bantu saya', 'Saya memerlukan pertolongan', theme),
-              _buildAacCard('Di mana toilet?', 'Tolong tunjukkan lokasi kamar mandi', theme),
-              _buildAacCard('Saya lapar & haus', 'Saya butuh makan atau minum', theme),
-              _buildAacCard('Ya', 'Jawaban ya', theme),
-              _buildAacCard('Tidak', 'Jawaban tidak', theme),
-              _buildAacCard('Terima kasih banyak', 'Ungkapan terima kasih', theme),
+              Icon(Icons.image_search_rounded, color: theme.colorScheme.primary),
+              const SizedBox(width: 8),
+              Expanded(
+                child: Text(
+                  _mediaStatus,
+                  style: theme.textTheme.titleMedium?.copyWith(
+                    fontWeight: FontWeight.w800,
+                  ),
+                ),
+              ),
             ],
           ),
-        ),
-      ],
-    );
-  }
-
-  Widget _buildAacCard(String speakText, String semanticLabel, ThemeData theme) {
-    return CustomCard(
-      onTap: () => _speak(speakText),
-      semanticLabel: 'Tombol Bicara: $speakText. $semanticLabel',
-      backgroundColor: theme.colorScheme.surface,
-      child: Center(
-        child: Text(
-          speakText,
-          style: theme.textTheme.titleMedium?.copyWith(
-            fontWeight: FontWeight.w900,
-            fontSize: 16,
+          const SizedBox(height: 12),
+          ClipRRect(
+            borderRadius: BorderRadius.circular(8),
+            child: AspectRatio(
+              aspectRatio: 16 / 9,
+              child: controller != null && _isCameraReady
+                  ? CameraPreview(controller)
+                  : Container(
+                      color: theme.colorScheme.primary.withValues(alpha: 0.08),
+                      child: Icon(
+                        Icons.camera_alt_outlined,
+                        size: 56,
+                        color: theme.colorScheme.primary,
+                      ),
+                    ),
+            ),
           ),
-          textAlign: TextAlign.center,
-        ),
+        ],
       ),
     );
   }
 
-  // --- 4. Disabilitas Ganda Layout (Haptic instructions & Tap trigger) ---
-  Widget _buildGandaLayout(ThemeData theme) {
-    return Column(
-      mainAxisAlignment: MainAxisAlignment.center,
-      children: [
-        Expanded(
-          child: CustomCard(
-            onTap: () {
-              // Pulse short haptic vibration
-              HapticFeedback.lightImpact();
-              Future.delayed(const Duration(milliseconds: 150), () => HapticFeedback.lightImpact());
-            },
-            semanticLabel: 'Area Sentuh Utama. Menghasilkan Getaran Ketukan Pendek.',
-            backgroundColor: Colors.grey.shade900,
-            child: const Center(
-              child: Column(
-                mainAxisAlignment: MainAxisAlignment.center,
-                children: [
-                  Icon(Icons.vibration_rounded, size: 80, color: Colors.amber),
-                  SizedBox(height: 20),
-                  Text(
-                    'GETARAN DUA KETUKAN (YA)',
-                    style: TextStyle(fontSize: 22, fontWeight: FontWeight.bold, color: Colors.white),
-                    textAlign: TextAlign.center,
-                  ),
-                ],
-              ),
-            ),
-          ),
-        ),
-        const SizedBox(height: 16),
-        Expanded(
-          child: CustomCard(
-            onTap: () {
-              HapticFeedback.heavyImpact();
-            },
-            semanticLabel: 'Area Sentuh Kedua. Menghasilkan Getaran Keras Panjang.',
-            backgroundColor: Colors.red.shade900,
-            child: const Center(
-              child: Column(
-                mainAxisAlignment: MainAxisAlignment.center,
-                children: [
-                  Icon(Icons.warning_rounded, size: 80, color: Colors.white),
-                  SizedBox(height: 20),
-                  Text(
-                    'GETARAN PANJANG (TIDAK/ALERT)',
-                    style: TextStyle(fontSize: 22, fontWeight: FontWeight.bold, color: Colors.white),
-                    textAlign: TextAlign.center,
-                  ),
-                ],
-              ),
-            ),
-          ),
-        ),
-      ],
-    );
-  }
-
-  // --- 5. Normal standard responsive layout ---
-  Widget _buildNormalLayout(ThemeData theme) {
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.stretch,
-      mainAxisAlignment: MainAxisAlignment.center,
-      children: [
-        Text(
-          'Asisten Aksesibilitas Suarasa',
-          style: theme.textTheme.titleLarge?.copyWith(fontWeight: FontWeight.bold),
-          textAlign: TextAlign.center,
-        ),
-        const SizedBox(height: 12),
-        const Text(
-          'Suarasa membantu menyetarakan interaksi sosial dengan teknologi pendeteksi visual Gemini AI, konversi teks suara cerdas, dan detektor sensor goyangan.',
-          textAlign: TextAlign.center,
-        ),
-        const SizedBox(height: 24),
-        Row(
-          children: [
-            Expanded(
-              child: CustomCard(
-                onTap: () => ref.read(accessibilityProvider.notifier).setDisabilityMode(DisabilityMode.tunanetra),
-                child: const Column(
-                  children: [
-                    Icon(Icons.visibility_off_rounded, size: 36, color: Colors.orange),
-                    SizedBox(height: 8),
-                    Text('Tunanetra', style: TextStyle(fontWeight: FontWeight.bold)),
-                  ],
-                ),
-              ),
-            ),
-            const SizedBox(width: 12),
-            Expanded(
-              child: CustomCard(
-                onTap: () => ref.read(accessibilityProvider.notifier).setDisabilityMode(DisabilityMode.tunarungu),
-                child: const Column(
-                  children: [
-                    Icon(Icons.hearing_disabled_rounded, size: 36, color: Colors.blue),
-                    SizedBox(height: 8),
-                    Text('Tunarungu', style: TextStyle(fontWeight: FontWeight.bold)),
-                  ],
-                ),
-              ),
-            ),
-          ],
-        ),
-        const SizedBox(height: 12),
-        Row(
-          children: [
-            Expanded(
-              child: CustomCard(
-                onTap: () => ref.read(accessibilityProvider.notifier).setDisabilityMode(DisabilityMode.tunawicara),
-                child: const Column(
-                  children: [
-                    Icon(Icons.record_voice_over_rounded, size: 36, color: Colors.teal),
-                    SizedBox(height: 8),
-                    Text('Tunawicara', style: TextStyle(fontWeight: FontWeight.bold)),
-                  ],
-                ),
-              ),
-            ),
-            const SizedBox(width: 12),
-            Expanded(
-              child: CustomCard(
-                onTap: () => ref.read(accessibilityProvider.notifier).setDisabilityMode(DisabilityMode.ganda),
-                child: const Column(
-                  children: [
-                    Icon(Icons.fingerprint_rounded, size: 36, color: Colors.purple),
-                    SizedBox(height: 8),
-                    Text('Ganda', style: TextStyle(fontWeight: FontWeight.bold)),
-                  ],
-                ),
-              ),
-            ),
-          ],
-        ),
-      ],
-    );
-  }
-
-  Widget _buildQuickSettingsCard(AccessibilitySettings settings) {
+  Widget _buildAiPanel(ThemeData theme) {
     return CustomCard(
-      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
-      child: Row(
-        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+      semanticLabel: 'Panel AI. Perintah terakhir: $_spokenCommand',
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Text(
-                'Skala Font: ${settings.textScaleFactor.toStringAsFixed(1)}x',
-                style: const TextStyle(fontWeight: FontWeight.bold),
-              ),
-              Text(
-                'Mode: ${settings.mode.name.toUpperCase()}',
-                style: const TextStyle(fontSize: 12),
-              ),
-            ],
-          ),
           Row(
             children: [
-              IconButton(
-                icon: const Icon(Icons.remove_circle_outline),
-                onPressed: () {
-                  ref.read(accessibilityProvider.notifier).setTextScaleFactor(settings.textScaleFactor - 0.1);
-                },
+              Icon(Icons.auto_awesome_rounded, color: theme.colorScheme.secondary),
+              const SizedBox(width: 8),
+              Text(
+                'AI demo',
+                style: theme.textTheme.titleMedium?.copyWith(
+                  fontWeight: FontWeight.w900,
+                ),
               ),
-              IconButton(
-                icon: const Icon(Icons.add_circle_outline),
-                onPressed: () {
-                  ref.read(accessibilityProvider.notifier).setTextScaleFactor(settings.textScaleFactor + 0.1);
-                },
+              const Spacer(),
+              Text(
+                '$_hapticSignals sinyal',
+                style: theme.textTheme.bodyMedium,
               ),
             ],
+          ),
+          const SizedBox(height: 10),
+          Text(
+            _spokenCommand,
+            style: theme.textTheme.bodyMedium?.copyWith(
+              fontWeight: FontWeight.w800,
+            ),
+          ),
+          const SizedBox(height: 6),
+          Text(_aiMessage, style: theme.textTheme.bodyLarge),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildQuickSpeak(ThemeData theme) {
+    return CustomCard(
+      semanticLabel: 'Alat bicara cepat',
+      child: Column(
+        children: [
+          TextField(
+            controller: _quickTextController,
+            decoration: const InputDecoration(
+              hintText: 'Ketik kalimat untuk dibacakan',
+              border: OutlineInputBorder(),
+            ),
+          ),
+          const SizedBox(height: 12),
+          AccessibleButton(
+            label: 'BACAKAN',
+            icon: Icons.volume_up_rounded,
+            onPressed: () {
+              final text = _quickTextController.text.trim();
+              if (text.isNotEmpty) {
+                _speak(text);
+              }
+            },
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _ActionTile extends StatelessWidget {
+  const _ActionTile({
+    required this.icon,
+    required this.label,
+    required this.value,
+    required this.onTap,
+  });
+
+  final IconData icon;
+  final String label;
+  final String value;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    return CustomCard(
+      onTap: onTap,
+      padding: const EdgeInsets.all(14),
+      semanticLabel: '$label, $value',
+      child: Column(
+        mainAxisAlignment: MainAxisAlignment.center,
+        children: [
+          Icon(icon, size: 42, color: theme.colorScheme.primary),
+          const SizedBox(height: 10),
+          Text(
+            label,
+            style: theme.textTheme.titleMedium?.copyWith(
+              fontWeight: FontWeight.w900,
+            ),
+            textAlign: TextAlign.center,
+          ),
+          const SizedBox(height: 4),
+          Text(
+            value,
+            style: theme.textTheme.bodyMedium,
+            textAlign: TextAlign.center,
           ),
         ],
       ),

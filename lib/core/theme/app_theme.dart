@@ -14,12 +14,14 @@ class AppTheme {
         primary: AppColors.lightPrimary,
         secondary: AppColors.lightSecondary,
         error: AppColors.error,
+        onPrimary: Colors.white,
+        onSurface: AppColors.lightTextPrimary,
       ),
       scaffoldBackgroundColor: AppColors.lightBackground,
       cardTheme: CardThemeData(
         color: AppColors.lightSurfaceCard,
         elevation: 0,
-        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
       ),
       textTheme: _buildTextTheme(
         baseTheme: ThemeData.light().textTheme,
@@ -40,68 +42,37 @@ class AppTheme {
     );
   }
 
-  static ThemeData get darkTheme {
-    return ThemeData(
-      useMaterial3: true,
-      brightness: Brightness.dark,
-      colorScheme: const ColorScheme.dark(
-        surface: AppColors.darkBackground,
-        primary: AppColors.darkPrimary,
-        secondary: AppColors.darkSecondary,
-        error: AppColors.error,
-      ),
-      scaffoldBackgroundColor: AppColors.darkBackground,
-      cardTheme: CardThemeData(
-        color: AppColors.darkSurfaceCard,
-        elevation: 0,
-        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
-      ),
-      textTheme: _buildTextTheme(
-        baseTheme: ThemeData.dark().textTheme,
-        textColor: AppColors.darkTextPrimary,
-        mutedColor: AppColors.darkTextSecondary,
-      ),
-      appBarTheme: const AppBarTheme(
-        backgroundColor: Colors.transparent,
-        elevation: 0,
-        centerTitle: true,
-        iconTheme: IconThemeData(color: AppColors.darkTextPrimary),
-        titleTextStyle: TextStyle(
-          color: AppColors.darkTextPrimary,
-          fontSize: 20,
-          fontWeight: FontWeight.bold,
-        ),
-      ),
-    );
-  }
+  static ThemeData get darkTheme => lightTheme;
 
   static ThemeData get highContrastTheme {
     return ThemeData(
       useMaterial3: true,
-      brightness: Brightness.dark,
-      colorScheme: const ColorScheme.dark(
+      brightness: Brightness.light,
+      colorScheme: const ColorScheme.light(
         surface: AppColors.hcBackground,
         primary: AppColors.hcPrimary,
         secondary: AppColors.hcSecondary,
         error: AppColors.error,
+        onPrimary: Colors.white,
+        onSurface: AppColors.hcTextPrimary,
       ),
       scaffoldBackgroundColor: AppColors.hcBackground,
       cardTheme: CardThemeData(
         color: AppColors.hcSurfaceCard,
         elevation: 0,
         shape: RoundedRectangleBorder(
-          borderRadius: BorderRadius.circular(12),
-          side: const BorderSide(color: AppColors.hcPrimary, width: 2),
+          borderRadius: BorderRadius.circular(8),
+          side: const BorderSide(color: AppColors.hcPrimary, width: 1.5),
         ),
       ),
       textTheme: _buildTextTheme(
-        baseTheme: ThemeData.dark().textTheme,
+        baseTheme: ThemeData.light().textTheme,
         textColor: AppColors.hcTextPrimary,
         mutedColor: AppColors.hcTextSecondary,
         isHighContrast: true,
       ),
       appBarTheme: const AppBarTheme(
-        backgroundColor: AppColors.hcSurface,
+        backgroundColor: Colors.transparent,
         elevation: 0,
         centerTitle: true,
         iconTheme: IconThemeData(color: AppColors.hcPrimary, size: 28),
@@ -128,7 +99,7 @@ class AppTheme {
         fontSize: 32 * scaleFactor,
         fontWeight: isHighContrast ? FontWeight.w900 : FontWeight.bold,
         color: textColor,
-        letterSpacing: -0.5,
+        letterSpacing: 0,
       ),
       displayMedium: TextStyle(
         fontSize: 28 * scaleFactor,
@@ -161,7 +132,7 @@ class AppTheme {
         fontSize: 14 * scaleFactor,
         fontWeight: FontWeight.bold,
         color: textColor,
-        letterSpacing: 1.0,
+        letterSpacing: 0,
       ),
     );
   }

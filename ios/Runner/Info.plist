@@ -26,6 +26,12 @@
 	<string>$(FLUTTER_BUILD_NUMBER)</string>
 	<key>LSRequiresIPhoneOS</key>
 	<true/>
+	<key>NSCameraUsageDescription</key>
+	<string>Suarasa memakai kamera untuk demo pengenalan visual berbasis AI.</string>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>Suarasa memakai mikrofon untuk demo perintah suara dan rekam video.</string>
+	<key>NSSpeechRecognitionUsageDescription</key>
+	<string>Suarasa memakai pengenalan suara untuk mendengar menu yang ingin dibuka pengguna.</string>
 	<key>UIApplicationSceneManifest</key>
 	<dict>
 		<key>UIApplicationSupportsMultipleScenes</key>

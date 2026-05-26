@@ -10,7 +10,7 @@ class AppRouter {
 
   static const String splash = '/';
   static const String onboarding = '/onboarding';
-  static const String modeSelector = '/mode-selector';
+  static const String modeSelector = '/access-demo';
   static const String home = '/home';
 
   static final GoRouter router = GoRouter(

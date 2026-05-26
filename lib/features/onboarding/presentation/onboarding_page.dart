@@ -41,11 +41,19 @@ class _OnboardingPageState extends State<OnboardingPage> {
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
-    final isHc = theme.colorScheme.surface == Colors.black;
+    final isHc = theme.colorScheme.primary.value == const Color(0xFF062947).value;
 
     return Scaffold(
       body: SafeArea(
-        child: Padding(
+        child: Container(
+          decoration: const BoxDecoration(
+            gradient: LinearGradient(
+              colors: [Color(0xFFEAF7FF), Color(0xFFCDEBFF)],
+              begin: Alignment.topCenter,
+              end: Alignment.bottomCenter,
+            ),
+          ),
+          child: Padding(
           padding: const EdgeInsets.symmetric(horizontal: 24.0, vertical: 16.0),
           child: Column(
             children: [
@@ -56,7 +64,7 @@ class _OnboardingPageState extends State<OnboardingPage> {
                   label: 'Lewati panduan',
                   button: true,
                   child: TextButton(
-                    onPressed: () => context.go(AppRouter.modeSelector),
+                    onPressed: () => context.go(AppRouter.home),
                     child: Text(
                       'LEWATI',
                       style: theme.textTheme.labelLarge?.copyWith(
@@ -89,10 +97,8 @@ class _OnboardingPageState extends State<OnboardingPage> {
                         children: [
                           Container(
                             padding: const EdgeInsets.all(32),
-                            decoration: BoxDecoration(
-                              color: isHc 
-                                  ? Colors.black 
-                                  : theme.colorScheme.primary.withValues(alpha: 0.08),
+                          decoration: BoxDecoration(
+                              color: theme.colorScheme.primary.withValues(alpha: 0.08),
                               shape: BoxShape.circle,
                               border: isHc 
                                   ? Border.all(color: theme.colorScheme.primary, width: 3)
@@ -163,16 +169,17 @@ class _OnboardingPageState extends State<OnboardingPage> {
                           curve: Curves.easeInOut,
                         );
                       } else {
-                        context.go(AppRouter.modeSelector);
+                        context.go(AppRouter.home);
                       }
                     },
                     semanticLabel: _currentPage == _slides.length - 1 
-                        ? 'Lanjutkan ke Pemilihan Mode Aksesibilitas' 
+                        ? 'Lanjutkan ke dashboard Suarasa'
                         : 'Lanjut ke halaman berikutnya',
                   ),
                 ],
               ),
             ],
+          ),
           ),
         ),
       ),

@@ -26,7 +26,7 @@ class CustomCard extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
-    final isHc = theme.colorScheme.surface == Colors.black; // Detect High Contrast
+    final isHc = theme.colorScheme.primary.value == const Color(0xFF062947).value;
 
     final cardColor = backgroundColor ?? theme.cardTheme.color ?? theme.colorScheme.surface;
     
@@ -40,7 +40,7 @@ class CustomCard extends StatelessWidget {
       padding: padding,
       decoration: BoxDecoration(
         color: cardColor,
-        borderRadius: BorderRadius.circular(isHc ? 12 : 20),
+        borderRadius: BorderRadius.circular(8),
         border: border,
         boxShadow: isHc
             ? null
@@ -61,7 +61,7 @@ class CustomCard extends StatelessWidget {
           HapticFeedback.lightImpact();
           onTap!();
         },
-        borderRadius: BorderRadius.circular(isHc ? 12 : 20),
+        borderRadius: BorderRadius.circular(8),
         child: cardContent,
       );
     }

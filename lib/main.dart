@@ -6,11 +6,7 @@ import 'core/theme/app_theme.dart';
 
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
-  runApp(
-    const ProviderScope(
-      child: SuarasaApp(),
-    ),
-  );
+  runApp(const ProviderScope(child: SuarasaApp()));
 }
 
 class SuarasaApp extends ConsumerWidget {
@@ -19,36 +15,28 @@ class SuarasaApp extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final settings = ref.watch(accessibilityProvider);
-    
-    // Choose correct theme based on settings
-    ThemeData appTheme;
-    if (settings.isHighContrast) {
-      appTheme = AppTheme.highContrastTheme;
-    } else {
-      // Default to dark theme for energy conservation and high legibility, light theme otherwise
-      appTheme = AppTheme.darkTheme;
-    }
+
+    final appTheme =
+        settings.isHighContrast ? AppTheme.highContrastTheme : AppTheme.lightTheme;
 
     return MaterialApp.router(
       title: 'Suarasa',
       debugShowCheckedModeBanner: false,
       routerConfig: AppRouter.router,
       theme: appTheme,
-      
+
       // Inject global font scaling for accessibility
       builder: (context, child) {
         final mediaQueryData = MediaQuery.of(context);
-        
+
         // Combine system text scaler with Suarasa's custom accessibility scaler multiplier
         final customTextScaler = _ScaledTextScaler(
           mediaQueryData.textScaler,
           settings.textScaleFactor,
         );
-        
+
         return MediaQuery(
-          data: mediaQueryData.copyWith(
-            textScaler: customTextScaler,
-          ),
+          data: mediaQueryData.copyWith(textScaler: customTextScaler),
           child: child ?? const SizedBox.shrink(),
         );
       },
@@ -65,6 +53,9 @@ class _ScaledTextScaler extends TextScaler {
   double scale(double fontSize) {
     return baseScaler.scale(fontSize) * multiplier;
   }
+
+  @override
+  double get textScaleFactor => scale(1.0);
 
   @override
   bool operator ==(Object other) {
