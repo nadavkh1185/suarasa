@@ -7,16 +7,17 @@ import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 import 'package:sensors_plus/sensors_plus.dart';
-import 'package:speech_to_text/speech_to_text.dart' as stt;
 import 'package:vibration/vibration.dart';
 
 import '../../../core/providers/accessibility_provider.dart';
 import '../../../core/providers/vision_mode_provider.dart';
+import '../../../core/providers/voice_command_provider.dart';
 import '../../../core/router/app_router.dart';
 import '../../../core/services/ai_demo_service.dart';
 import '../../../core/services/camera_service.dart';
 import '../../../core/services/gemini_vision_service.dart';
 import '../../../core/services/text_to_speech_service.dart';
+import '../../../core/services/voice_command_service.dart';
 import '../../../core/widgets/accessible_button.dart';
 import '../../../core/widgets/custom_card.dart';
 
@@ -31,14 +32,18 @@ class _HomePageState extends ConsumerState<HomePage> {
   final CameraService _cameraService = CameraService();
   final GeminiVisionService _geminiVisionService = GeminiVisionService();
   final TextToSpeechService _tts = TextToSpeechService();
-  final stt.SpeechToText _speech = stt.SpeechToText();
+  final VoiceCommandService _voiceCommandService = VoiceCommandService();
   final AiDemoService _aiDemo = const AiDemoService();
   final TextEditingController _quickTextController = TextEditingController();
   final TextEditingController _targetController = TextEditingController(text: 'kunci');
   StreamSubscription<AccelerometerEvent>? _accelerometerSubscription;
+  VoiceCommandController? _voiceCommandController;
+  Timer? _shakeResolutionTimer;
 
   bool _speechReady = false;
   bool _isListening = false;
+  bool _isSpeaking = false;
+  bool _isProcessingCommand = false;
   bool _isCameraReady = false;
   bool _isRecordingVideo = false;
   bool _isAnalyzingVision = false;
@@ -51,8 +56,10 @@ class _HomePageState extends ConsumerState<HomePage> {
   String _mediaStatus = 'Kamera belum aktif';
   String _visionStatus = 'Pilih Analisis sekitar, Cari objek, atau Baca isyarat.';
   DateTime? _lastShakeTime;
+  int _shakeCount = 0;
 
-  static const Duration _shakeCooldown = Duration(seconds: 2);
+  static const Duration _shakeDebounce = Duration(milliseconds: 1200);
+  static const Duration _doubleShakeWindow = Duration(milliseconds: 2600);
   static const double _shakeThreshold = 21;
 
   @override
@@ -63,6 +70,9 @@ class _HomePageState extends ConsumerState<HomePage> {
     _initHaptic();
     _initCamera();
     _startMotionDetection();
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _startVoiceCommandFlow();
+    });
   }
 
   Future<void> _initTts() async {
@@ -70,9 +80,10 @@ class _HomePageState extends ConsumerState<HomePage> {
   }
 
   Future<void> _initSpeech() async {
-    final ready = await _speech.initialize();
+    final ready = await _voiceCommandService.initialize();
     if (mounted) {
       setState(() => _speechReady = ready);
+      ref.read(voiceCommandProvider.notifier).setInitialized(ready);
     }
   }
 
@@ -112,113 +123,130 @@ class _HomePageState extends ConsumerState<HomePage> {
 
       if (level > _shakeThreshold) {
         final now = DateTime.now();
-        if (_lastShakeTime == null ||
-            now.difference(_lastShakeTime!) > _shakeCooldown) {
-          _lastShakeTime = now;
-          _onShakeDetected();
+        if (_lastShakeTime != null && now.difference(_lastShakeTime!) < _shakeDebounce) {
+          return;
         }
+        _lastShakeTime = now;
+        _registerShakeDetected();
       }
     });
   }
 
-  Future<void> _onShakeDetected() async {
-    ref.read(accessibilityProvider.notifier).enableHapticFocus();
-    await _playHapticPattern([0, 120, 90, 240]);
-    await _speak(
-      'Goyangan terdeteksi. Mode haptic fokus aktif. Ucapkan menu yang ingin dibuka.',
-    );
-    if (!_isListening) {
-      await _listenForCommand();
+  void _registerShakeDetected() {
+    debugPrint('[Shake] detected');
+    if (_isSpeaking || _isProcessingCommand || _isListening) {
+      debugPrint('[Shake] ignored: system busy');
+      return;
     }
+
+    ref.read(accessibilityProvider.notifier).enableHapticFocus();
+    _shakeCount += 1;
+    _playHapticPattern([0, 80]);
+
+    _shakeResolutionTimer?.cancel();
+    _shakeResolutionTimer = Timer(_doubleShakeWindow, () async {
+      final count = _shakeCount;
+      _shakeCount = 0;
+      if (!mounted) return;
+
+      if (count >= 2) {
+        debugPrint('[VoiceCommand] double shake matched: analyze navigation');
+        await _playHapticPattern([0, 220, 80, 220]);
+        await _analyzeNavigation();
+      } else {
+        debugPrint('[VoiceCommand] activated by shake');
+        await _playHapticPattern([0, 120]);
+        await _voiceCommandController?.listenNow(withPrompt: true);
+      }
+    });
   }
 
   Future<void> _listenForCommand() async {
-    if (!_speechReady) {
-      await _speak('Perekam suara belum siap. Periksa izin mikrofon.');
-      return;
-    }
-
-    setState(() => _isListening = true);
-    await _playHapticPattern([0, 80]);
-    await _speech.listen(
-      localeId: 'id_ID',
-      listenMode: stt.ListenMode.confirmation,
-      onResult: (result) async {
-        if (!result.finalResult) return;
-        final text = result.recognizedWords.trim();
-        if (text.isEmpty) return;
-        await _handleCommand(text);
-      },
-    );
+    await _voiceCommandController?.listenNow(withPrompt: true);
   }
 
   Future<void> _stopListening() async {
-    await _speech.stop();
+    await _voiceCommandController?.stopListening();
     if (mounted) {
       setState(() => _isListening = false);
+      ref.read(voiceCommandProvider.notifier).setListening(false);
     }
   }
 
-  Future<void> _handleCommand(String text) async {
-    await _stopListening();
-    final lower = text.toLowerCase();
+  Future<void> _startVoiceCommandFlow() async {
+    await _tts.initialize();
+    _voiceCommandController ??= VoiceCommandController(
+      service: _voiceCommandService,
+      tts: _tts,
+      onCommand: _executeVoiceCommand,
+      onListeningChanged: (isListening) {
+        if (!mounted) return;
+        setState(() => _isListening = isListening);
+        ref.read(voiceCommandProvider.notifier).setListening(isListening);
+      },
+      onSpeakingChanged: (isSpeaking) {
+        if (!mounted) return;
+        setState(() => _isSpeaking = isSpeaking);
+      },
+    );
 
-    if (_hasAny(lower, ['arahkan jalan', 'arah jalan', 'navigasi', 'jalan aman'])) {
-      setState(() => _spokenCommand = text);
-      await _analyzeNavigation();
-      return;
-    }
-
-    if (_hasAny(lower, ['cari ', 'carikan ', 'temukan '])) {
-      final target = _extractSearchTarget(lower);
-      if (target.isNotEmpty) {
-        _targetController.text = target;
+    if (!_speechReady) {
+      final ready = await _voiceCommandService.initialize();
+      if (!mounted) return;
+      setState(() => _speechReady = ready);
+      ref.read(voiceCommandProvider.notifier).setInitialized(ready);
+      if (!ready) {
+        await _tts.speakAndWait('Izin mikrofon belum aktif. Periksa izin aplikasi Suarasa.');
+        return;
       }
-      setState(() => _spokenCommand = text);
-      await _searchObject();
-      return;
     }
 
-    if (_hasAny(lower, ['isyarat', 'bahasa isyarat', 'gesture', 'gestur'])) {
-      setState(() => _spokenCommand = text);
-      await _readSignLanguage();
-      return;
-    }
+    await _speak(VoiceCommandController.introPrompt);
+  }
 
-    final result = _aiDemo.understandCommand(text);
+  Future<void> _executeVoiceCommand(VoiceCommand command) async {
+    debugPrint('[VoiceCommand] executing command: ${command.type.name}');
+    setState(() => _isProcessingCommand = true);
     setState(() {
-      _spokenCommand = text;
-      _aiMessage = result.message;
+      _spokenCommand = command.rawText;
     });
-    await _playHapticPattern(result.hapticPattern);
-    await _speak(result.message);
 
-    if (lower.contains('kamera') ||
-        lower.contains('foto') ||
-        lower.contains('gambar') ||
-        lower.contains('lihat')) {
-      await _takePictureDemo();
-    } else if (lower.contains('video') || lower.contains('rekam')) {
-      await _toggleVideoRecording();
+    try {
+      switch (command.type) {
+        case VoiceCommandType.navigation:
+          await _analyzeNavigation();
+          break;
+        case VoiceCommandType.objectSearch:
+          if (command.target != null && command.target!.isNotEmpty) {
+            debugPrint('[VoiceCommand] object target: ${command.target}');
+            _targetController.text = command.target!;
+          }
+          await _searchObject();
+          break;
+        case VoiceCommandType.signLanguage:
+          await _readSignLanguage();
+          break;
+        case VoiceCommandType.frontCamera:
+          await _useCamera(CameraLensDirection.front);
+          await _speak('Kamera depan aktif.');
+          break;
+        case VoiceCommandType.backCamera:
+          await _useCamera(CameraLensDirection.back);
+          await _speak('Kamera belakang aktif.');
+          break;
+        case VoiceCommandType.stop:
+          await _voiceCommandController?.stopListening();
+          await _speak('Suarasa berhenti mendengarkan.');
+          break;
+        case VoiceCommandType.unknown:
+          await _speak('Perintah belum dikenali. Goyangkan ponsel untuk mencoba lagi.');
+          break;
+      }
+    } finally {
+      if (mounted) {
+        setState(() => _isProcessingCommand = false);
+      }
     }
-  }
-
-  bool _hasAny(String source, List<String> words) {
-    return words.any(source.contains);
-  }
-
-  String _extractSearchTarget(String command) {
-    var target = command
-        .replaceFirst('carikan ', '')
-        .replaceFirst('cari ', '')
-        .replaceFirst('temukan ', '')
-        .replaceAll('benda ', '')
-        .trim();
-
-    if (target.startsWith('objek ')) {
-      target = target.replaceFirst('objek ', '').trim();
-    }
-    return target;
   }
 
   Future<void> _takePictureDemo() async {
@@ -286,6 +314,28 @@ class _HomePageState extends ConsumerState<HomePage> {
         _mediaStatus = 'Mengganti kamera...';
       });
       await _cameraService.switchCamera();
+      if (!mounted) return;
+      setState(() {
+        _isCameraReady = _cameraService.isReady;
+        _mediaStatus = '${_cameraService.cameraLabel} siap';
+      });
+      await _playHapticPattern([0, 70]);
+    } on CameraException catch (error) {
+      setState(() => _mediaStatus = error.description ?? 'Gagal mengganti kamera');
+    } catch (error) {
+      setState(() => _mediaStatus = 'Gagal mengganti kamera: $error');
+    }
+  }
+
+  Future<void> _useCamera(CameraLensDirection direction) async {
+    if (_isAnalyzingVision || _isRecordingVideo) return;
+
+    try {
+      setState(() {
+        _isCameraReady = false;
+        _mediaStatus = 'Mengganti kamera...';
+      });
+      await _cameraService.useLens(direction);
       if (!mounted) return;
       setState(() {
         _isCameraReady = _cameraService.isReady;
@@ -426,16 +476,27 @@ class _HomePageState extends ConsumerState<HomePage> {
   }
 
   Future<void> _speak(String text) async {
-    await _tts.speak(text);
+    if (mounted) {
+      setState(() => _isSpeaking = true);
+    }
+    try {
+      await _tts.speakAndWait(text);
+    } finally {
+      if (mounted) {
+        setState(() => _isSpeaking = false);
+      }
+    }
   }
 
   @override
   void dispose() {
     _accelerometerSubscription?.cancel();
+    _shakeResolutionTimer?.cancel();
+    _voiceCommandController?.dispose();
     _cameraService.dispose();
     _quickTextController.dispose();
     _targetController.dispose();
-    _speech.stop();
+    _voiceCommandService.stop();
     _tts.stop();
     super.dispose();
   }

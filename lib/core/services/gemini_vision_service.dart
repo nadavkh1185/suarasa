@@ -164,9 +164,10 @@ Maksimal 3 kalimat.
 ''';
 
   static String _objectSearchPrompt(String target) => '''
-Pengguna tunanetra sedang mencari: $target.
-Analisis gambar dari kamera. Jika objek terlihat, sebutkan posisi relatifnya: kiri, kanan, tengah, atas, bawah, dekat, atau jauh.
-Berikan instruksi sederhana untuk mengarahkan kamera atau berjalan, misalnya "geser kamera ke kiri" atau "maju pelan".
+User sedang mencari objek bernama $target.
+Analisis gambar dan jelaskan posisi, arah, dan jarak objek relatif terhadap pengguna.
+Jika objek terlihat, sebutkan posisi relatifnya: kiri, kanan, tengah, atas, bawah, dekat, atau jauh.
+Berikan instruksi sederhana untuk mengarahkan kamera atau berjalan.
 Jika tidak terlihat, katakan "$target tidak terlihat" dan sarankan arah memindai perlahan.
 Jawab singkat dalam Bahasa Indonesia. Maksimal 3 kalimat.
 ''';
