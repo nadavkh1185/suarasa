@@ -21,7 +21,24 @@ class AppTheme {
       cardTheme: CardThemeData(
         color: AppColors.lightSurfaceCard,
         elevation: 0,
-        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(24)),
+      ),
+      inputDecorationTheme: InputDecorationTheme(
+        filled: true,
+        fillColor: Colors.white.withValues(alpha: 0.78),
+        contentPadding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+        border: OutlineInputBorder(
+          borderRadius: BorderRadius.circular(16),
+          borderSide: BorderSide(color: AppColors.lightPrimary.withValues(alpha: 0.12)),
+        ),
+        enabledBorder: OutlineInputBorder(
+          borderRadius: BorderRadius.circular(16),
+          borderSide: BorderSide(color: AppColors.lightPrimary.withValues(alpha: 0.12)),
+        ),
+        focusedBorder: OutlineInputBorder(
+          borderRadius: BorderRadius.circular(16),
+          borderSide: const BorderSide(color: AppColors.lightPrimary, width: 1.4),
+        ),
       ),
       textTheme: _buildTextTheme(
         baseTheme: ThemeData.light().textTheme,
@@ -61,7 +78,7 @@ class AppTheme {
         color: AppColors.hcSurfaceCard,
         elevation: 0,
         shape: RoundedRectangleBorder(
-          borderRadius: BorderRadius.circular(8),
+          borderRadius: BorderRadius.circular(20),
           side: const BorderSide(color: AppColors.hcPrimary, width: 1.5),
         ),
       ),
@@ -91,9 +108,8 @@ class AppTheme {
     required Color mutedColor,
     bool isHighContrast = false,
   }) {
-    // High contrast has slightly larger font sizes and bolder weights for accessibility
     final double scaleFactor = isHighContrast ? 1.15 : 1.0;
-    
+
     return GoogleFonts.interTextTheme(baseTheme).copyWith(
       displayLarge: TextStyle(
         fontSize: 32 * scaleFactor,

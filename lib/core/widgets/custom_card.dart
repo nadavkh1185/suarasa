@@ -7,9 +7,11 @@ class CustomCard extends StatelessWidget {
   final String? semanticLabel;
   final String? semanticHint;
   final Color? backgroundColor;
+  final Gradient? gradient;
   final double? height;
   final double? width;
   final EdgeInsetsGeometry padding;
+  final double borderRadius;
 
   const CustomCard({
     super.key,
@@ -18,9 +20,11 @@ class CustomCard extends StatelessWidget {
     this.semanticLabel,
     this.semanticHint,
     this.backgroundColor,
+    this.gradient,
     this.height,
     this.width,
-    this.padding = const EdgeInsets.all(20.0),
+    this.padding = const EdgeInsets.all(16.0),
+    this.borderRadius = 24.0,
   });
 
   @override
@@ -29,8 +33,8 @@ class CustomCard extends StatelessWidget {
     final isHc = theme.colorScheme.primary.value == const Color(0xFF062947).value;
 
     final cardColor = backgroundColor ?? theme.cardTheme.color ?? theme.colorScheme.surface;
-    
-    final border = isHc 
+
+    final border = isHc
         ? Border.all(color: theme.colorScheme.primary, width: 2.0)
         : Border.all(color: theme.dividerColor.withValues(alpha: 0.05), width: 1.0);
 
@@ -39,16 +43,22 @@ class CustomCard extends StatelessWidget {
       height: height,
       padding: padding,
       decoration: BoxDecoration(
-        color: cardColor,
-        borderRadius: BorderRadius.circular(8),
+        color: gradient == null ? cardColor : null,
+        gradient: gradient,
+        borderRadius: BorderRadius.circular(isHc ? 16 : borderRadius),
         border: border,
         boxShadow: isHc
             ? null
             : [
                 BoxShadow(
-                  color: Colors.black.withValues(alpha: 0.04),
-                  blurRadius: 16,
-                  offset: const Offset(0, 4),
+                  color: const Color(0xFF0F4C81).withValues(alpha: 0.10),
+                  blurRadius: 24,
+                  offset: const Offset(0, 10),
+                ),
+                BoxShadow(
+                  color: Colors.white.withValues(alpha: 0.75),
+                  blurRadius: 8,
+                  offset: const Offset(-2, -2),
                 ),
               ],
       ),
@@ -61,7 +71,7 @@ class CustomCard extends StatelessWidget {
           HapticFeedback.lightImpact();
           onTap!();
         },
-        borderRadius: BorderRadius.circular(8),
+        borderRadius: BorderRadius.circular(isHc ? 16 : borderRadius),
         child: cardContent,
       );
     }

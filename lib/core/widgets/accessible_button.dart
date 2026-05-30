@@ -22,7 +22,7 @@ class AccessibleButton extends StatelessWidget {
     this.icon,
     this.backgroundColor,
     this.textColor,
-    this.minHeight = 64.0, // Minimum accessible tap target height
+    this.minHeight = 52.0,
     this.isFullWidth = true,
     this.isSecondary = false,
   });
@@ -37,23 +37,23 @@ class AccessibleButton extends StatelessWidget {
 
     if (isSecondary) {
       buttonColor = Colors.transparent;
-      contentColor = isHc 
-          ? theme.colorScheme.primary 
-          : theme.colorScheme.onSurface;
+      contentColor = isHc ? theme.colorScheme.primary : theme.colorScheme.onSurface;
     } else {
       buttonColor = backgroundColor ?? theme.colorScheme.primary;
-      contentColor = textColor ?? (isHc ? Colors.black : theme.colorScheme.onPrimary);
+      contentColor = textColor ?? theme.colorScheme.onPrimary;
     }
 
     final BorderSide borderSide = isSecondary || isHc
         ? BorderSide(
-            color: isHc ? theme.colorScheme.primary : theme.colorScheme.primary.withValues(alpha: 0.5),
-            width: isHc ? 3.0 : 2.0,
+            color: isHc
+                ? theme.colorScheme.primary
+                : theme.colorScheme.primary.withValues(alpha: 0.35),
+            width: isHc ? 2.0 : 1.5,
           )
         : BorderSide.none;
 
     Widget buttonChild = Padding(
-      padding: const EdgeInsets.symmetric(horizontal: 16.0, vertical: 12.0),
+      padding: const EdgeInsets.symmetric(horizontal: 14.0, vertical: 10.0),
       child: Row(
         mainAxisSize: MainAxisSize.min,
         mainAxisAlignment: MainAxisAlignment.center,
@@ -63,16 +63,18 @@ class AccessibleButton extends StatelessWidget {
             Icon(
               icon,
               color: contentColor,
-              size: 26,
+              size: 22,
             ),
-            const SizedBox(width: 12),
+            const SizedBox(width: 8),
           ],
           Flexible(
             child: Text(
               label,
-              style: theme.textTheme.titleMedium?.copyWith(
+              maxLines: 2,
+              overflow: TextOverflow.ellipsis,
+              style: theme.textTheme.labelLarge?.copyWith(
                 color: contentColor,
-                fontWeight: FontWeight.bold,
+                fontWeight: FontWeight.w800,
               ),
               textAlign: TextAlign.center,
             ),
@@ -89,20 +91,21 @@ class AccessibleButton extends StatelessWidget {
       child: SizedBox(
         width: isFullWidth ? double.infinity : null,
         child: OutlinedButton(
-        style: OutlinedButton.styleFrom(
-          backgroundColor: buttonColor,
-          side: borderSide,
-          shape: RoundedRectangleBorder(
-            borderRadius: BorderRadius.circular(8),
+          style: OutlinedButton.styleFrom(
+            backgroundColor: buttonColor,
+            side: borderSide,
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(16),
+            ),
+            elevation: isHc ? 0 : 1,
+            shadowColor: theme.colorScheme.primary.withValues(alpha: 0.18),
+            tapTargetSize: MaterialTapTargetSize.shrinkWrap,
           ),
-          elevation: isHc ? 0 : 2,
-        ),
-        onPressed: () {
-          // Accessibility feedback: trigger haptic feedback on press
-          HapticFeedback.mediumImpact();
-          onPressed();
-        },
-        child: buttonChild,
+          onPressed: () {
+            HapticFeedback.mediumImpact();
+            onPressed();
+          },
+          child: buttonChild,
         ),
       ),
     );
@@ -110,7 +113,8 @@ class AccessibleButton extends StatelessWidget {
     // Accessibility Semantics
     return Semantics(
       label: semanticLabel ?? label,
-      hint: semanticHint ?? (isSecondary ? 'Klik dua kali untuk memilih opsi alternatif' : 'Klik dua kali untuk mengaktifkan'),
+      hint: semanticHint ??
+          (isSecondary ? 'Klik dua kali untuk memilih opsi alternatif' : 'Klik dua kali untuk mengaktifkan'),
       button: true,
       enabled: true,
       excludeSemantics: true, // Hide internal text widgets from screen readers so they only hear the unified label

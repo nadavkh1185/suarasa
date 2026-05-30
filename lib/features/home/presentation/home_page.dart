@@ -5,15 +5,18 @@ import 'package:camera/camera.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
-import 'package:flutter_tts/flutter_tts.dart';
 import 'package:go_router/go_router.dart';
 import 'package:sensors_plus/sensors_plus.dart';
 import 'package:speech_to_text/speech_to_text.dart' as stt;
 import 'package:vibration/vibration.dart';
 
 import '../../../core/providers/accessibility_provider.dart';
+import '../../../core/providers/vision_mode_provider.dart';
 import '../../../core/router/app_router.dart';
 import '../../../core/services/ai_demo_service.dart';
+import '../../../core/services/camera_service.dart';
+import '../../../core/services/gemini_vision_service.dart';
+import '../../../core/services/text_to_speech_service.dart';
 import '../../../core/widgets/accessible_button.dart';
 import '../../../core/widgets/custom_card.dart';
 
@@ -25,25 +28,28 @@ class HomePage extends ConsumerStatefulWidget {
 }
 
 class _HomePageState extends ConsumerState<HomePage> {
-  final FlutterTts _tts = FlutterTts();
+  final CameraService _cameraService = CameraService();
+  final GeminiVisionService _geminiVisionService = GeminiVisionService();
+  final TextToSpeechService _tts = TextToSpeechService();
   final stt.SpeechToText _speech = stt.SpeechToText();
   final AiDemoService _aiDemo = const AiDemoService();
   final TextEditingController _quickTextController = TextEditingController();
-
-  CameraController? _cameraController;
+  final TextEditingController _targetController = TextEditingController(text: 'kunci');
   StreamSubscription<AccelerometerEvent>? _accelerometerSubscription;
 
   bool _speechReady = false;
   bool _isListening = false;
   bool _isCameraReady = false;
   bool _isRecordingVideo = false;
+  bool _isAnalyzingVision = false;
   bool _hasVibrator = false;
   double _motionLevel = 0;
   int _hapticSignals = 0;
   String _spokenCommand = 'Ucapkan nama menu atau kebutuhan.';
   String _aiMessage =
-      'AI demo siap membantu memilih aksi dari suara, kamera, dan sensor gerak.';
+      'Gemini Vision siap untuk navigasi, pencarian objek, dan baca isyarat.';
   String _mediaStatus = 'Kamera belum aktif';
+  String _visionStatus = 'Pilih Analisis sekitar, Cari objek, atau Baca isyarat.';
   DateTime? _lastShakeTime;
 
   static const Duration _shakeCooldown = Duration(seconds: 2);
@@ -60,9 +66,7 @@ class _HomePageState extends ConsumerState<HomePage> {
   }
 
   Future<void> _initTts() async {
-    await _tts.setLanguage('id-ID');
-    await _tts.setPitch(1);
-    await _tts.setSpeechRate(0.48);
+    await _tts.initialize();
   }
 
   Future<void> _initSpeech() async {
@@ -81,32 +85,19 @@ class _HomePageState extends ConsumerState<HomePage> {
 
   Future<void> _initCamera() async {
     try {
-      final cameras = await availableCameras();
-      if (cameras.isEmpty) {
-        if (mounted) setState(() => _mediaStatus = 'Kamera tidak ditemukan');
-        return;
-      }
-
-      final controller = CameraController(
-        cameras.first,
-        ResolutionPreset.medium,
-        enableAudio: true,
-      );
-      await controller.initialize();
-
-      if (!mounted) {
-        await controller.dispose();
-        return;
-      }
+      await _cameraService.initialize();
 
       setState(() {
-        _cameraController = controller;
         _isCameraReady = true;
-        _mediaStatus = 'Kamera siap untuk foto dan video demo';
+        _mediaStatus = '${_cameraService.cameraLabel} siap';
       });
-    } catch (_) {
+    } on CameraException catch (error) {
       if (mounted) {
-        setState(() => _mediaStatus = 'Kamera perlu izin perangkat');
+        setState(() => _mediaStatus = error.description ?? 'Kamera perlu izin perangkat');
+      }
+    } catch (error) {
+      if (mounted) {
+        setState(() => _mediaStatus = 'Kamera gagal dibuka: $error');
       }
     }
   }
@@ -170,6 +161,30 @@ class _HomePageState extends ConsumerState<HomePage> {
 
   Future<void> _handleCommand(String text) async {
     await _stopListening();
+    final lower = text.toLowerCase();
+
+    if (_hasAny(lower, ['arahkan jalan', 'arah jalan', 'navigasi', 'jalan aman'])) {
+      setState(() => _spokenCommand = text);
+      await _analyzeNavigation();
+      return;
+    }
+
+    if (_hasAny(lower, ['cari ', 'carikan ', 'temukan '])) {
+      final target = _extractSearchTarget(lower);
+      if (target.isNotEmpty) {
+        _targetController.text = target;
+      }
+      setState(() => _spokenCommand = text);
+      await _searchObject();
+      return;
+    }
+
+    if (_hasAny(lower, ['isyarat', 'bahasa isyarat', 'gesture', 'gestur'])) {
+      setState(() => _spokenCommand = text);
+      await _readSignLanguage();
+      return;
+    }
+
     final result = _aiDemo.understandCommand(text);
     setState(() {
       _spokenCommand = text;
@@ -178,7 +193,6 @@ class _HomePageState extends ConsumerState<HomePage> {
     await _playHapticPattern(result.hapticPattern);
     await _speak(result.message);
 
-    final lower = text.toLowerCase();
     if (lower.contains('kamera') ||
         lower.contains('foto') ||
         lower.contains('gambar') ||
@@ -189,9 +203,26 @@ class _HomePageState extends ConsumerState<HomePage> {
     }
   }
 
+  bool _hasAny(String source, List<String> words) {
+    return words.any(source.contains);
+  }
+
+  String _extractSearchTarget(String command) {
+    var target = command
+        .replaceFirst('carikan ', '')
+        .replaceFirst('cari ', '')
+        .replaceFirst('temukan ', '')
+        .replaceAll('benda ', '')
+        .trim();
+
+    if (target.startsWith('objek ')) {
+      target = target.replaceFirst('objek ', '').trim();
+    }
+    return target;
+  }
+
   Future<void> _takePictureDemo() async {
-    final controller = _cameraController;
-    if (controller == null || !_isCameraReady || controller.value.isTakingPicture) {
+    if (!_cameraService.isReady) {
       final result = _aiDemo.describeScene(hasCameraFrame: false);
       setState(() => _aiMessage = result.message);
       await _speak(result.message);
@@ -199,7 +230,7 @@ class _HomePageState extends ConsumerState<HomePage> {
     }
 
     try {
-      final file = await controller.takePicture();
+      final file = await _cameraService.captureImage();
       final result = _aiDemo.describeScene(hasCameraFrame: true);
       setState(() {
         _mediaStatus = 'Foto demo tersimpan: ${file.name}';
@@ -213,15 +244,14 @@ class _HomePageState extends ConsumerState<HomePage> {
   }
 
   Future<void> _toggleVideoRecording() async {
-    final controller = _cameraController;
-    if (controller == null || !_isCameraReady) {
+    if (!_cameraService.isReady) {
       setState(() => _mediaStatus = 'Video perlu kamera aktif');
       return;
     }
 
     try {
       if (_isRecordingVideo) {
-        final file = await controller.stopVideoRecording();
+        final file = await _cameraService.startOrStopVideo();
         setState(() {
           _isRecordingVideo = false;
           _mediaStatus = 'Video demo tersimpan: ${file.name}';
@@ -229,16 +259,160 @@ class _HomePageState extends ConsumerState<HomePage> {
         await _playHapticPattern([0, 70, 70, 70]);
         await _speak('Rekaman video demo selesai.');
       } else {
-        await controller.startVideoRecording();
+        await _cameraService.startOrStopVideo();
+      }
+    } on CameraException catch (error) {
+      if (error.code == 'recording_started') {
         setState(() {
           _isRecordingVideo = true;
           _mediaStatus = 'Sedang merekam video demo';
         });
         await _playHapticPattern([0, 180]);
         await _speak('Rekaman video demo dimulai.');
+      } else {
+        setState(() => _mediaStatus = error.description ?? 'Rekam video belum berhasil');
       }
     } catch (_) {
       setState(() => _mediaStatus = 'Rekam video belum berhasil');
+    }
+  }
+
+  Future<void> _switchCamera() async {
+    if (_isAnalyzingVision || _isRecordingVideo) return;
+
+    try {
+      setState(() {
+        _isCameraReady = false;
+        _mediaStatus = 'Mengganti kamera...';
+      });
+      await _cameraService.switchCamera();
+      if (!mounted) return;
+      setState(() {
+        _isCameraReady = _cameraService.isReady;
+        _mediaStatus = '${_cameraService.cameraLabel} siap';
+      });
+      await _playHapticPattern([0, 70]);
+    } on CameraException catch (error) {
+      setState(() => _mediaStatus = error.description ?? 'Gagal mengganti kamera');
+    } catch (error) {
+      setState(() => _mediaStatus = 'Gagal mengganti kamera: $error');
+    }
+  }
+
+  Future<void> _analyzeNavigation() async {
+    ref.read(visionModeProvider.notifier).state = VisionMode.navigation;
+    await _runGeminiVision(
+      mode: GeminiVisionMode.navigation,
+      loadingMessage: 'Menganalisis jalan di sekitar...',
+    );
+  }
+
+  Future<void> _searchObject() async {
+    ref.read(visionModeProvider.notifier).state = VisionMode.objectSearch;
+    await _runGeminiVision(
+      mode: GeminiVisionMode.objectSearch,
+      loadingMessage: 'Mencari ${_targetController.text.trim()}...',
+    );
+  }
+
+  Future<void> _readSignLanguage() async {
+    ref.read(visionModeProvider.notifier).state = VisionMode.signLanguage;
+    if (_cameraService.lensDirection != CameraLensDirection.front) {
+      await _cameraService.useLens(CameraLensDirection.front);
+      if (mounted) {
+        setState(() {
+          _isCameraReady = _cameraService.isReady;
+          _mediaStatus = '${_cameraService.cameraLabel} siap untuk isyarat';
+        });
+      }
+    }
+    await _runGeminiVision(
+      mode: GeminiVisionMode.signLanguage,
+      loadingMessage: 'Membaca gestur bahasa isyarat...',
+    );
+  }
+
+  Future<void> _runGeminiVision({
+    required GeminiVisionMode mode,
+    required String loadingMessage,
+  }) async {
+    if (_isAnalyzingVision) return;
+    if (!_cameraService.isReady) {
+      await _initCamera();
+      if (!_cameraService.isReady) {
+        await _speak('Kamera belum siap. Periksa izin kamera.');
+        return;
+      }
+    }
+
+    setState(() {
+      _isAnalyzingVision = true;
+      _visionStatus = loadingMessage;
+      _aiMessage = loadingMessage;
+    });
+
+    try {
+      final image = await _cameraService.captureImage();
+      final GeminiVisionResult result;
+      switch (mode) {
+        case GeminiVisionMode.navigation:
+          result = await _geminiVisionService.analyzeNavigation(image);
+          break;
+        case GeminiVisionMode.objectSearch:
+          result = await _geminiVisionService.searchObject(
+            image: image,
+            target: _targetController.text,
+          );
+          break;
+        case GeminiVisionMode.signLanguage:
+          result = await _geminiVisionService.readSignLanguage(image);
+          break;
+      }
+
+      if (!mounted) return;
+      setState(() {
+        _mediaStatus = 'Frame dianalisis dari ${_cameraService.cameraLabel}';
+        _visionStatus = _labelForMode(mode);
+        _aiMessage = result.text;
+      });
+      await _playHapticPattern(result.isUrgent ? [0, 250, 90, 250] : [0, 90, 60, 90]);
+      await _speak(result.text);
+    } on StateError catch (error) {
+      final message = error.message;
+      setState(() {
+        _visionStatus = 'Gemini belum siap';
+        _aiMessage = message;
+      });
+      await _speak(message);
+    } on CameraException catch (error) {
+      final message = error.description ?? 'Kamera gagal mengambil gambar.';
+      setState(() {
+        _visionStatus = 'Kamera bermasalah';
+        _aiMessage = message;
+      });
+      await _speak(message);
+    } catch (error) {
+      final message = 'Analisis gagal. Periksa koneksi internet dan coba lagi.';
+      setState(() {
+        _visionStatus = 'Analisis gagal';
+        _aiMessage = '$message ($error)';
+      });
+      await _speak(message);
+    } finally {
+      if (mounted) {
+        setState(() => _isAnalyzingVision = false);
+      }
+    }
+  }
+
+  String _labelForMode(GeminiVisionMode mode) {
+    switch (mode) {
+      case GeminiVisionMode.navigation:
+        return 'Navigasi tunanetra';
+      case GeminiVisionMode.objectSearch:
+        return 'Pencarian objek';
+      case GeminiVisionMode.signLanguage:
+        return 'Baca bahasa isyarat';
     }
   }
 
@@ -252,15 +426,15 @@ class _HomePageState extends ConsumerState<HomePage> {
   }
 
   Future<void> _speak(String text) async {
-    await _tts.stop();
     await _tts.speak(text);
   }
 
   @override
   void dispose() {
     _accelerometerSubscription?.cancel();
-    _cameraController?.dispose();
+    _cameraService.dispose();
     _quickTextController.dispose();
+    _targetController.dispose();
     _speech.stop();
     _tts.stop();
     super.dispose();
@@ -298,28 +472,49 @@ class _HomePageState extends ConsumerState<HomePage> {
           ),
         ],
       ),
-      body: SafeArea(
-        child: Container(
-          decoration: const BoxDecoration(
-            gradient: LinearGradient(
-              colors: [Color(0xFFEAF7FF), Color(0xFFCDEBFF)],
-              begin: Alignment.topCenter,
-              end: Alignment.bottomCenter,
-            ),
+      body: Container(
+        decoration: const BoxDecoration(
+          gradient: LinearGradient(
+            colors: [Color(0xFFEAF7FF), Color(0xFFCDEBFF)],
+            begin: Alignment.topCenter,
+            end: Alignment.bottomCenter,
           ),
-          child: ListView(
-            padding: const EdgeInsets.all(16),
-            children: [
-              _buildHero(theme),
-              const SizedBox(height: 14),
-              _buildSignalGrid(theme),
-              const SizedBox(height: 14),
-              _buildCameraDemo(theme),
-              const SizedBox(height: 14),
-              _buildAiPanel(theme),
-              const SizedBox(height: 14),
-              _buildQuickSpeak(theme),
-            ],
+        ),
+        child: SafeArea(
+          child: LayoutBuilder(
+            builder: (context, constraints) {
+              final horizontalPadding = constraints.maxWidth >= 720 ? 24.0 : 16.0;
+              final maxContentWidth = constraints.maxWidth >= 980 ? 920.0 : double.infinity;
+
+              return ListView(
+                padding: EdgeInsets.symmetric(
+                  horizontal: horizontalPadding,
+                  vertical: 14,
+                ),
+                children: [
+                  Center(
+                    child: ConstrainedBox(
+                      constraints: BoxConstraints(maxWidth: maxContentWidth),
+                      child: Column(
+                        children: [
+                          _buildHero(theme),
+                          const SizedBox(height: 14),
+                          _buildSignalGrid(theme),
+                          const SizedBox(height: 14),
+                          _buildVisionActions(theme),
+                          const SizedBox(height: 14),
+                          _buildCameraDemo(theme),
+                          const SizedBox(height: 14),
+                          _buildAiPanel(theme),
+                          const SizedBox(height: 14),
+                          _buildQuickSpeak(theme),
+                        ],
+                      ),
+                    ),
+                  ),
+                ],
+              );
+            },
           ),
         ),
       ),
@@ -329,36 +524,55 @@ class _HomePageState extends ConsumerState<HomePage> {
   Widget _buildHero(ThemeData theme) {
     return CustomCard(
       semanticLabel: 'Dashboard Suarasa terpadu',
+      gradient: const LinearGradient(
+        colors: [Color(0xFFFFFFFF), Color(0xFFE8F8FF)],
+        begin: Alignment.topLeft,
+        end: Alignment.bottomRight,
+      ),
       child: Row(
+        crossAxisAlignment: CrossAxisAlignment.center,
         children: [
           Container(
-            width: 70,
-            height: 70,
+            width: 56,
+            height: 56,
             decoration: BoxDecoration(
-              color: theme.colorScheme.primary.withValues(alpha: 0.1),
-              borderRadius: BorderRadius.circular(8),
+              gradient: LinearGradient(
+                colors: [
+                  theme.colorScheme.primary.withValues(alpha: 0.16),
+                  theme.colorScheme.secondary.withValues(alpha: 0.12),
+                ],
+                begin: Alignment.topLeft,
+                end: Alignment.bottomRight,
+              ),
+              borderRadius: BorderRadius.circular(18),
             ),
             child: Icon(
               Icons.settings_voice_rounded,
               color: theme.colorScheme.primary,
-              size: 42,
+              size: 32,
             ),
           ),
-          const SizedBox(width: 14),
+          const SizedBox(width: 12),
           Expanded(
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisSize: MainAxisSize.min,
               children: [
                 Text(
                   'Bantuan adaptif aktif',
+                  maxLines: 2,
+                  overflow: TextOverflow.ellipsis,
                   style: theme.textTheme.titleLarge?.copyWith(
                     fontWeight: FontWeight.w900,
+                    fontSize: 20,
                   ),
                 ),
-                const SizedBox(height: 6),
+                const SizedBox(height: 4),
                 Text(
                   'Suara, kamera, AI, dan getaran bekerja dalam satu layar.',
-                  style: theme.textTheme.bodyMedium,
+                  maxLines: 3,
+                  overflow: TextOverflow.ellipsis,
+                  style: theme.textTheme.bodyMedium?.copyWith(height: 1.35),
                 ),
               ],
             ),
@@ -370,46 +584,201 @@ class _HomePageState extends ConsumerState<HomePage> {
 
   Widget _buildSignalGrid(ThemeData theme) {
     final motionText = _motionLevel.toStringAsFixed(1);
-    return GridView.count(
-      shrinkWrap: true,
-      physics: const NeverScrollableScrollPhysics(),
-      crossAxisCount: 2,
-      mainAxisSpacing: 12,
-      crossAxisSpacing: 12,
-      childAspectRatio: 1.08,
-      children: [
-        _ActionTile(
-          icon: _isListening ? Icons.hearing_rounded : Icons.mic_rounded,
-          label: _isListening ? 'Mendengar' : 'Perintah',
-          value: _speechReady ? 'Siap' : 'Izin mic',
-          onTap: _isListening ? _stopListening : _listenForCommand,
-        ),
-        _ActionTile(
-          icon: Icons.photo_camera_rounded,
-          label: 'Foto',
-          value: _isCameraReady ? 'Siap' : 'Izin kamera',
-          onTap: _takePictureDemo,
-        ),
-        _ActionTile(
-          icon: _isRecordingVideo ? Icons.stop_circle_rounded : Icons.videocam_rounded,
-          label: 'Video',
-          value: _isRecordingVideo ? 'Rekam' : 'Demo',
-          onTap: _toggleVideoRecording,
-        ),
-        _ActionTile(
-          icon: Icons.vibration_rounded,
-          label: 'Haptic',
-          value: 'Gerak $motionText',
-          onTap: () => _playHapticPattern([0, 100, 80, 220]),
-        ),
-      ],
+    final actions = [
+      _ActionTileData(
+        icon: _isListening ? Icons.hearing_rounded : Icons.mic_rounded,
+        label: _isListening ? 'Mendengar' : 'Perintah',
+        value: _speechReady ? 'Siap' : 'Izin mic',
+        colors: const [Color(0xFFFFF4D8), Color(0xFFFFE7A3)],
+        onTap: _isListening ? _stopListening : _listenForCommand,
+      ),
+      _ActionTileData(
+        icon: Icons.photo_camera_rounded,
+        label: 'Foto',
+        value: _isCameraReady ? 'Siap' : 'Izin kamera',
+        colors: const [Color(0xFFE5F5FF), Color(0xFFBFE7FF)],
+        onTap: _takePictureDemo,
+      ),
+      _ActionTileData(
+        icon: _isRecordingVideo ? Icons.stop_circle_rounded : Icons.videocam_rounded,
+        label: 'Video',
+        value: _isRecordingVideo ? 'Rekam' : 'Demo',
+        colors: const [Color(0xFFEAFBEF), Color(0xFFC6F2D7)],
+        onTap: _toggleVideoRecording,
+      ),
+      _ActionTileData(
+        icon: Icons.vibration_rounded,
+        label: 'Haptic',
+        value: 'Gerak $motionText',
+        colors: const [Color(0xFFF3ECFF), Color(0xFFDCCBFF)],
+        onTap: () => _playHapticPattern([0, 100, 80, 220]),
+      ),
+    ];
+
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final spacing = constraints.maxWidth >= 600 ? 14.0 : 12.0;
+        final columnCount = constraints.maxWidth >= 840 ? 4 : 2;
+        final itemWidth =
+            (constraints.maxWidth - spacing * (columnCount - 1)) / columnCount;
+
+        return Wrap(
+          spacing: spacing,
+          runSpacing: spacing,
+          children: [
+            for (final action in actions)
+              SizedBox(
+                width: itemWidth,
+                child: _ActionTile(
+                  icon: action.icon,
+                  label: action.label,
+                  value: action.value,
+                  colors: action.colors,
+                  onTap: action.onTap,
+                ),
+              ),
+          ],
+        );
+      },
+    );
+  }
+
+  Widget _buildVisionActions(ThemeData theme) {
+    final visionMode = ref.watch(visionModeProvider);
+
+    return CustomCard(
+      semanticLabel: 'Kontrol Gemini Vision untuk navigasi dan bahasa isyarat',
+      gradient: const LinearGradient(
+        colors: [Color(0xFFFFFFFF), Color(0xFFEAF8FF)],
+        begin: Alignment.topLeft,
+        end: Alignment.bottomRight,
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Container(
+                width: 42,
+                height: 42,
+                decoration: BoxDecoration(
+                  color: theme.colorScheme.primary.withValues(alpha: 0.10),
+                  borderRadius: BorderRadius.circular(16),
+                ),
+                child: Icon(
+                  Icons.center_focus_strong_rounded,
+                  color: theme.colorScheme.primary,
+                ),
+              ),
+              const SizedBox(width: 10),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      'Gemini Vision',
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: theme.textTheme.titleMedium?.copyWith(
+                        fontSize: 16,
+                        fontWeight: FontWeight.w900,
+                      ),
+                    ),
+                    Text(
+                      _visionStatus,
+                      maxLines: 2,
+                      overflow: TextOverflow.ellipsis,
+                      style: theme.textTheme.bodySmall?.copyWith(height: 1.35),
+                    ),
+                  ],
+                ),
+              ),
+              const SizedBox(width: 8),
+              IconButton.filledTonal(
+                tooltip: 'Ganti kamera depan atau belakang',
+                onPressed: _isAnalyzingVision ? null : _switchCamera,
+                icon: const Icon(Icons.cameraswitch_rounded),
+              ),
+            ],
+          ),
+          const SizedBox(height: 12),
+          TextField(
+            controller: _targetController,
+            enabled: !_isAnalyzingVision,
+            decoration: const InputDecoration(
+              prefixIcon: Icon(Icons.search_rounded),
+              hintText: 'Target objek, contoh: kunci, pintu, kursi',
+            ),
+            textInputAction: TextInputAction.done,
+          ),
+          const SizedBox(height: 12),
+          if (_isAnalyzingVision)
+            LinearProgressIndicator(
+              minHeight: 6,
+              borderRadius: BorderRadius.circular(99),
+            ),
+          if (_isAnalyzingVision) const SizedBox(height: 12),
+          LayoutBuilder(
+            builder: (context, constraints) {
+              final isWide = constraints.maxWidth >= 720;
+              final buttonWidth =
+                  isWide ? (constraints.maxWidth - 20) / 3 : constraints.maxWidth;
+              final buttons = [
+                _VisionButtonData(
+                  label: 'Analisis sekitar',
+                  icon: Icons.directions_walk_rounded,
+                  active: visionMode == VisionMode.navigation,
+                  onPressed: _analyzeNavigation,
+                ),
+                _VisionButtonData(
+                  label: 'Cari objek',
+                  icon: Icons.manage_search_rounded,
+                  active: visionMode == VisionMode.objectSearch,
+                  onPressed: _searchObject,
+                ),
+                _VisionButtonData(
+                  label: 'Baca isyarat',
+                  icon: Icons.sign_language_rounded,
+                  active: visionMode == VisionMode.signLanguage,
+                  onPressed: _readSignLanguage,
+                ),
+              ];
+
+              return Wrap(
+                spacing: 10,
+                runSpacing: 10,
+                children: [
+                  for (final button in buttons)
+                    SizedBox(
+                      width: buttonWidth,
+                      child: AccessibleButton(
+                        label: button.label,
+                        icon: button.icon,
+                        minHeight: 50,
+                        backgroundColor: button.active
+                            ? theme.colorScheme.secondary
+                            : theme.colorScheme.primary,
+                        onPressed: _isAnalyzingVision ? () {} : button.onPressed,
+                      ),
+                    ),
+                ],
+              );
+            },
+          ),
+        ],
+      ),
     );
   }
 
   Widget _buildCameraDemo(ThemeData theme) {
-    final controller = _cameraController;
+    final controller = _cameraService.controller;
     return CustomCard(
       semanticLabel: 'Demo kamera. $_mediaStatus',
+      gradient: const LinearGradient(
+        colors: [Color(0xFFFFFFFF), Color(0xFFEAF8FF)],
+        begin: Alignment.topLeft,
+        end: Alignment.bottomRight,
+      ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
@@ -420,7 +789,25 @@ class _HomePageState extends ConsumerState<HomePage> {
               Expanded(
                 child: Text(
                   _mediaStatus,
+                  maxLines: 2,
+                  overflow: TextOverflow.ellipsis,
                   style: theme.textTheme.titleMedium?.copyWith(
+                    fontWeight: FontWeight.w800,
+                    fontSize: 16,
+                  ),
+                ),
+              ),
+              const SizedBox(width: 8),
+              Container(
+                padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+                decoration: BoxDecoration(
+                  color: theme.colorScheme.primary.withValues(alpha: 0.10),
+                  borderRadius: BorderRadius.circular(99),
+                ),
+                child: Text(
+                  _cameraService.cameraLabel,
+                  style: theme.textTheme.bodySmall?.copyWith(
+                    color: theme.colorScheme.primary,
                     fontWeight: FontWeight.w800,
                   ),
                 ),
@@ -428,21 +815,36 @@ class _HomePageState extends ConsumerState<HomePage> {
             ],
           ),
           const SizedBox(height: 12),
-          ClipRRect(
-            borderRadius: BorderRadius.circular(8),
-            child: AspectRatio(
-              aspectRatio: 16 / 9,
-              child: controller != null && _isCameraReady
-                  ? CameraPreview(controller)
-                  : Container(
-                      color: theme.colorScheme.primary.withValues(alpha: 0.08),
-                      child: Icon(
-                        Icons.camera_alt_outlined,
-                        size: 56,
-                        color: theme.colorScheme.primary,
-                      ),
-                    ),
-            ),
+          LayoutBuilder(
+            builder: (context, constraints) {
+              final aspectRatio = constraints.maxWidth < 520 ? 4 / 3 : 16 / 9;
+
+              return ClipRRect(
+                borderRadius: BorderRadius.circular(20),
+                child: AspectRatio(
+                  aspectRatio: aspectRatio,
+                  child: controller != null && _cameraService.isReady
+                      ? CameraPreview(controller)
+                      : Container(
+                          decoration: BoxDecoration(
+                            gradient: LinearGradient(
+                              colors: [
+                                theme.colorScheme.primary.withValues(alpha: 0.08),
+                                theme.colorScheme.secondary.withValues(alpha: 0.12),
+                              ],
+                              begin: Alignment.topLeft,
+                              end: Alignment.bottomRight,
+                            ),
+                          ),
+                          child: Icon(
+                            Icons.camera_alt_outlined,
+                            size: 48,
+                            color: theme.colorScheme.primary,
+                          ),
+                        ),
+                ),
+              );
+            },
           ),
         ],
       ),
@@ -452,6 +854,11 @@ class _HomePageState extends ConsumerState<HomePage> {
   Widget _buildAiPanel(ThemeData theme) {
     return CustomCard(
       semanticLabel: 'Panel AI. Perintah terakhir: $_spokenCommand',
+      gradient: const LinearGradient(
+        colors: [Color(0xFFFFFFFF), Color(0xFFF4F0FF)],
+        begin: Alignment.topLeft,
+        end: Alignment.bottomRight,
+      ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
@@ -459,28 +866,41 @@ class _HomePageState extends ConsumerState<HomePage> {
             children: [
               Icon(Icons.auto_awesome_rounded, color: theme.colorScheme.secondary),
               const SizedBox(width: 8),
-              Text(
-                'AI demo',
-                style: theme.textTheme.titleMedium?.copyWith(
-                  fontWeight: FontWeight.w900,
+              Expanded(
+                child: Text(
+                  'AI demo',
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: theme.textTheme.titleMedium?.copyWith(
+                    fontWeight: FontWeight.w900,
+                    fontSize: 16,
+                  ),
                 ),
               ),
-              const Spacer(),
+              const SizedBox(width: 8),
               Text(
                 '$_hapticSignals sinyal',
-                style: theme.textTheme.bodyMedium,
+                style: theme.textTheme.bodySmall?.copyWith(
+                  color: theme.colorScheme.primary.withValues(alpha: 0.72),
+                  fontWeight: FontWeight.w700,
+                ),
               ),
             ],
           ),
           const SizedBox(height: 10),
           Text(
             _spokenCommand,
+            maxLines: 2,
+            overflow: TextOverflow.ellipsis,
             style: theme.textTheme.bodyMedium?.copyWith(
               fontWeight: FontWeight.w800,
             ),
           ),
           const SizedBox(height: 6),
-          Text(_aiMessage, style: theme.textTheme.bodyLarge),
+          Text(
+            _aiMessage,
+            style: theme.textTheme.bodyMedium?.copyWith(height: 1.45),
+          ),
         ],
       ),
     );
@@ -489,14 +909,20 @@ class _HomePageState extends ConsumerState<HomePage> {
   Widget _buildQuickSpeak(ThemeData theme) {
     return CustomCard(
       semanticLabel: 'Alat bicara cepat',
+      gradient: const LinearGradient(
+        colors: [Color(0xFFFFFFFF), Color(0xFFEFFBF8)],
+        begin: Alignment.topLeft,
+        end: Alignment.bottomRight,
+      ),
       child: Column(
         children: [
           TextField(
             controller: _quickTextController,
             decoration: const InputDecoration(
               hintText: 'Ketik kalimat untuk dibacakan',
-              border: OutlineInputBorder(),
             ),
+            minLines: 1,
+            maxLines: 3,
           ),
           const SizedBox(height: 12),
           AccessibleButton(
@@ -520,12 +946,14 @@ class _ActionTile extends StatelessWidget {
     required this.icon,
     required this.label,
     required this.value,
+    required this.colors,
     required this.onTap,
   });
 
   final IconData icon;
   final String label;
   final String value;
+  final List<Color> colors;
   final VoidCallback onTap;
 
   @override
@@ -533,28 +961,79 @@ class _ActionTile extends StatelessWidget {
     final theme = Theme.of(context);
     return CustomCard(
       onTap: onTap,
-      padding: const EdgeInsets.all(14),
+      padding: const EdgeInsets.all(12),
       semanticLabel: '$label, $value',
+      gradient: LinearGradient(
+        colors: colors,
+        begin: Alignment.topLeft,
+        end: Alignment.bottomRight,
+      ),
+      borderRadius: 22,
       child: Column(
-        mainAxisAlignment: MainAxisAlignment.center,
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Icon(icon, size: 42, color: theme.colorScheme.primary),
-          const SizedBox(height: 10),
+          Container(
+            width: 42,
+            height: 42,
+            decoration: BoxDecoration(
+              color: Colors.white.withValues(alpha: 0.70),
+              borderRadius: BorderRadius.circular(16),
+            ),
+            child: Icon(icon, size: 24, color: theme.colorScheme.primary),
+          ),
+          const SizedBox(height: 9),
           Text(
             label,
-            style: theme.textTheme.titleMedium?.copyWith(
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+            style: theme.textTheme.titleSmall?.copyWith(
               fontWeight: FontWeight.w900,
+              color: theme.colorScheme.primary,
             ),
-            textAlign: TextAlign.center,
           ),
-          const SizedBox(height: 4),
+          const SizedBox(height: 2),
           Text(
             value,
-            style: theme.textTheme.bodyMedium,
-            textAlign: TextAlign.center,
+            maxLines: 2,
+            overflow: TextOverflow.ellipsis,
+            style: theme.textTheme.bodySmall?.copyWith(
+              color: theme.colorScheme.primary.withValues(alpha: 0.70),
+              fontWeight: FontWeight.w700,
+            ),
           ),
         ],
       ),
     );
   }
+}
+
+class _ActionTileData {
+  const _ActionTileData({
+    required this.icon,
+    required this.label,
+    required this.value,
+    required this.colors,
+    required this.onTap,
+  });
+
+  final IconData icon;
+  final String label;
+  final String value;
+  final List<Color> colors;
+  final VoidCallback onTap;
+}
+
+class _VisionButtonData {
+  const _VisionButtonData({
+    required this.label,
+    required this.icon,
+    required this.active,
+    required this.onPressed,
+  });
+
+  final String label;
+  final IconData icon;
+  final bool active;
+  final VoidCallback onPressed;
 }
